@@ -59,6 +59,21 @@ npm install
 npm run dev
 ```
 
+### Desktop (Electron wrapper)
+```bash
+cd desktop
+npm install
+npm run dev
+```
+This expects the frontend dev server at `http://localhost:5173`.
+
+To run desktop against a built frontend bundle:
+```bash
+cd desktop
+npm run build:web
+npm run start
+```
+
 ## Tests
 ```bash
 cd backend

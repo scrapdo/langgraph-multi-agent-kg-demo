@@ -26,6 +26,18 @@ async def _emit(run_id: str, node: str, status: str, detail: str) -> None:
     )
 
 
+def _format_risk_flags(flags: list[str]) -> str:
+    if not flags:
+        return "No major flags"
+    pretty: list[str] = []
+    for flag in flags:
+        if flag.startswith("llm_critic_error"):
+            pretty.append("critic_llm_unavailable")
+        else:
+            pretty.append(flag)
+    return ", ".join(pretty)
+
+
 async def _with_node_retry(state: AgentState, node_name: str, fn: Callable[[], Awaitable[AgentState]]) -> AgentState:
     run_id = state["run_id"]
     try:
@@ -106,7 +118,7 @@ async def critic_node(state: AgentState) -> AgentState:
         llm = build_llm(temperature=0)
         prompt = (
             "Evaluate this research for factuality and actionability. "
-            f"Task: {state['task']}\\nNotes: {notes}\\n"
+            f"Task: {state['task']}\nNotes: {notes}\n"
             "Return PASS or FAIL with one short reason."
         )
         verdict = "PASS"
@@ -118,8 +130,8 @@ async def critic_node(state: AgentState) -> AgentState:
                 if "FAIL" in text.upper():
                     verdict = "FAIL"
                 reason = text[:200]
-        except Exception as exc:
-            critique_flags.append(f"llm_critic_error:{type(exc).__name__}")
+        except Exception:
+            critique_flags.append("llm_critic_error")
 
         if verdict == "FAIL":
             critique_flags.append("critic_failed")
@@ -142,12 +154,15 @@ async def writer_node(state: AgentState) -> AgentState:
         await _emit(run_id, "writer", "start", "Drafting final report")
 
         report = (
-            f"# Market Research Brief\\n\\n"
-            f"Task: {state['task']}\\n\\n"
-            f"## Plan\\n{state.get('coordinator_plan', 'N/A')}\\n\\n"
-            f"## Findings\\n" + "\\n".join(f"- {n}" for n in state.get("research_notes", [])) + "\\n\\n"
-            f"## Risk Review\\n" + (", ".join(state.get("critique_flags", [])) or "No major flags") + "\\n\\n"
-            f"## Citations\\n" + "\\n".join(f"- {c}" for c in state.get("citations", []))
+            f"# Market Research Brief\n\n"
+            f"Task: {state['task']}\n\n"
+            f"## Plan\n{state.get('coordinator_plan', 'N/A')}\n\n"
+            f"## Findings\n"
+            + "\n".join(f"- {n}" for n in state.get("research_notes", []))
+            + "\n\n"
+            + f"## Risk Review\n{_format_risk_flags(state.get('critique_flags', []))}\n\n"
+            + f"## Citations\n"
+            + "\n".join(f"- {c}" for c in state.get("citations", []))
         )
 
         for note in state.get("research_notes", [])[:3]:
@@ -178,8 +193,8 @@ async def degraded_handler_node(state: AgentState) -> AgentState:
     run_id = state["run_id"]
     await _emit(run_id, "degraded_handler", "error", "Workflow degraded; using fallback summary")
     fallback = (
-        "# Degraded Result\\n\\n"
-        f"Task: {state['task']}\\n\\n"
+        "# Degraded Result\n\n"
+        f"Task: {state['task']}\n\n"
         "The workflow encountered repeated failures. This fallback output was generated from cached context."
     )
     neo4j_service.log_node_execution(run_id, "degraded_handler", "Fallback path used")

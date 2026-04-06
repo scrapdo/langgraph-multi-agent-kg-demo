@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from zep_cloud.client import AsyncZep
@@ -17,15 +18,13 @@ class MemoryService:
         if not self._client:
             return []
         try:
-            # Basic recall path; if API shape changes, this degrades gracefully.
-            memories = await self._client.memory.search_sessions(
-                user_id=user_id,
-                text=query,
-                limit=5,
+            memories = await asyncio.wait_for(
+                self._client.memory.search_sessions(user_id=user_id, text=query, limit=5),
+                timeout=8,
             )
             return [
                 {
-                    "memory_id": m.session_id,
+                    "memory_id": getattr(m, "session_id", ""),
                     "summary": getattr(m, "summary", None),
                     "score": getattr(m, "score", None),
                 }
@@ -38,10 +37,13 @@ class MemoryService:
         if not self._client:
             return
         try:
-            await self._client.memory.add(
-                session_id=session_id,
-                messages=[{"role": "assistant", "content": content}],
-                user_id=user_id,
+            await asyncio.wait_for(
+                self._client.memory.add(
+                    session_id=session_id,
+                    messages=[{"role": "assistant", "content": content}],
+                    user_id=user_id,
+                ),
+                timeout=8,
             )
         except Exception:
             return

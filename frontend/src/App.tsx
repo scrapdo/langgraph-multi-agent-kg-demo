@@ -11,8 +11,8 @@ export default function App() {
   return (
     <main className="app-shell">
       <header className="hero">
-        <h1>LangGraph Multi-Agent Knowledge Graph Demo</h1>
-        <p>Coordinator, Researcher, Critic, Writer with Neo4j + Zep + Live Event Streams</p>
+        <h1>Talking / Listening Brain Demo</h1>
+        <p>Voice-ready coordinator, researcher, critic, writer workflow with live memory and graph state.</p>
       </header>
       <section className="grid two-col">
         <RunConsole onRunChange={setRunId} />

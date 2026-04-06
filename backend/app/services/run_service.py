@@ -12,9 +12,17 @@ from app.services.neo4j_service import neo4j_service
 workflow_app = build_graph()
 
 
+async def _safe_upsert_run(run_id: str, task: str, status: str) -> None:
+    try:
+        neo4j_service.upsert_run(run_id, task=task, status=status)
+    except Exception:
+        # Neo4j may be temporarily unavailable during startup; run should still proceed.
+        return
+
+
 async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, Any]:
     run_store.update(run_id, status="running")
-    neo4j_service.upsert_run(run_id, task=initial_state["task"], status="running")
+    await _safe_upsert_run(run_id, task=initial_state["task"], status="running")
     await event_bus.publish(run_id, {"node": "system", "status": "running", "detail": "Run started"})
 
     try:
@@ -22,12 +30,12 @@ async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, A
         result = await workflow_app.ainvoke(initial_state, config=config)
         final_status = result.get("run_status", "completed")
         run_store.update(run_id, status=final_status, state=result, output=result.get("final_report"))
-        neo4j_service.upsert_run(run_id, task=initial_state["task"], status=final_status)
+        await _safe_upsert_run(run_id, task=initial_state["task"], status=final_status)
         await event_bus.publish(run_id, {"node": "system", "status": final_status, "detail": "Run finished"})
         return result
     except Exception as exc:
         run_store.update(run_id, status="failed", state={"error": str(exc)}, output=None)
-        neo4j_service.upsert_run(run_id, task=initial_state["task"], status="failed")
+        await _safe_upsert_run(run_id, task=initial_state["task"], status="failed")
         await event_bus.publish(run_id, {"node": "system", "status": "failed", "detail": str(exc)})
         return {"error": str(exc)}
 

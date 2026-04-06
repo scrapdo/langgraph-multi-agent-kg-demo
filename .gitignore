@@ -1,0 +1,24 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+
+# Node
+node_modules/
+frontend/node_modules/
+desktop/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
