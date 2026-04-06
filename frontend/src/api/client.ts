@@ -1,4 +1,11 @@
-import type { GraphResponse, RunDetail, RunMode, RunResponse } from '../types';
+import type {
+  AgentProfilesResponse,
+  GraphResponse,
+  ProvidersCatalog,
+  RunDetail,
+  RunMode,
+  RunResponse,
+} from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
@@ -30,6 +37,30 @@ export async function getHealth(): Promise<Record<string, unknown>> {
   return res.json();
 }
 
+export async function getProvidersCatalog(): Promise<ProvidersCatalog> {
+  const res = await fetch(`${API_BASE}/providers/catalog`);
+  if (!res.ok) throw new Error(`Failed to fetch provider catalog: ${res.status}`);
+  return res.json();
+}
+
+export async function getAgentProfiles(): Promise<AgentProfilesResponse> {
+  const res = await fetch(`${API_BASE}/agents/config`);
+  if (!res.ok) throw new Error(`Failed to fetch agent profiles: ${res.status}`);
+  return res.json();
+}
+
+export async function updateAgentProfiles(
+  agents: Record<string, Partial<{ name: string; avatar: string; provider: string; model: string; function: string }>>,
+): Promise<AgentProfilesResponse> {
+  const res = await fetch(`${API_BASE}/agents/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agents }),
+  });
+  if (!res.ok) throw new Error(`Failed to update agent profiles: ${res.status}`);
+  return res.json();
+}
+
 export function streamEvents(runId: string, onEvent: (event: Record<string, unknown>) => void): EventSource {
   const source = new EventSource(`${API_BASE}/runs/${runId}/events`);
   source.onmessage = (evt) => {
@@ -40,4 +71,10 @@ export function streamEvents(runId: string, onEvent: (event: Record<string, unkn
     }
   };
   return source;
+}
+
+export async function getRunSpeech(runId: string, voice = 'alloy'): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/runs/${runId}/speech?voice=${encodeURIComponent(voice)}&fmt=mp3`);
+  if (!res.ok) throw new Error(`Failed to fetch speech audio: ${res.status}`);
+  return res.blob();
 }

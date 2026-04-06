@@ -7,6 +7,7 @@ from typing import Any
 from app.events.bus import event_bus
 from app.graph.workflow import build_graph
 from app.repositories.run_store import run_store
+from app.services.agent_profile_service import agent_profile_service
 from app.services.neo4j_service import neo4j_service
 
 workflow_app = build_graph()
@@ -47,12 +48,15 @@ def create_run(task: str, mode: str, user_id: str, session_id: str) -> str:
     initial_state = {
         "run_id": run_id,
         "task": task,
+        "task_type": "conversation",
+        "agent_profiles": agent_profile_service.get_profiles(),
         "mode": mode,
         "user_id": user_id,
         "session_id": session_id,
         "revision_count": 0,
         "max_revisions": 2,
         "run_status": "queued",
+        "spoken_response": "",
         "research_notes": [],
         "citations": [],
         "critique_flags": [],

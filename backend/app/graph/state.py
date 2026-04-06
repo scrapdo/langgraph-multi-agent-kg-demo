@@ -9,12 +9,15 @@ class AgentState(TypedDict, total=False):
     session_id: str
     mode: Literal["simulation", "live"]
     task: str
+    task_type: Literal["market_research", "capabilities", "conversation"]
+    agent_profiles: dict[str, dict[str, str]]
 
     coordinator_plan: str
     research_notes: list[str]
     citations: list[str]
     critique_flags: list[str]
     final_report: str
+    spoken_response: str
 
     memory_refs: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]

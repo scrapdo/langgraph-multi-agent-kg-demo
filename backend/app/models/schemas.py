@@ -42,6 +42,31 @@ class GraphDelta(BaseModel):
     created_relationships: int = 0
 
 
+class AgentProfile(BaseModel):
+    id: str
+    name: str
+    avatar: str
+    provider: str
+    model: str
+    function: str = ""
+
+
+class AgentProfilesPayload(BaseModel):
+    agents: dict[str, AgentProfile]
+
+
+class AgentProfilePatch(BaseModel):
+    name: str | None = None
+    avatar: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    function: str | None = None
+
+
+class AgentProfileUpdatePayload(BaseModel):
+    agents: dict[str, AgentProfilePatch]
+
+
 class RunResponse(BaseModel):
     run_id: str
     status: RunStatus

@@ -34,3 +34,28 @@ export interface GraphResponse {
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  avatar: string;
+  provider: string;
+  model: string;
+  function: string;
+}
+
+export interface AgentProfilesResponse {
+  agents: Record<string, AgentProfile>;
+}
+
+export interface ProviderDefinition {
+  id: string;
+  name: string;
+  enabled: boolean;
+  models: string[];
+}
+
+export interface ProvidersCatalog {
+  providers: ProviderDefinition[];
+  recommended_by_function: Record<string, { provider: string; model: string }>;
+}
