@@ -1,0 +1,99 @@
+:root {
+  --bg: #08111f;
+  --panel: #0f172a;
+  --panel-2: #111827;
+  --text: #e2e8f0;
+  --muted: #93a4bb;
+  --accent: #ff8a00;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  color: var(--text);
+  background: radial-gradient(circle at 20% 0%, #1f2937, var(--bg) 45%);
+}
+
+.app-shell {
+  max-width: 1300px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.hero {
+  padding: 1.2rem;
+  border: 1px solid #334155;
+  background: linear-gradient(135deg, #0f172a, #1e293b);
+  border-radius: 14px;
+}
+
+.hero h1 { margin: 0 0 0.5rem; font-size: clamp(1.2rem, 2.8vw, 2rem); }
+.hero p { margin: 0; color: var(--muted); }
+
+.grid {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.two-col {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.panel {
+  border: 1px solid #334155;
+  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  border-radius: 12px;
+  padding: 0.9rem;
+}
+
+.form-grid {
+  display: grid;
+  gap: 0.7rem;
+}
+
+textarea,
+select,
+button {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid #475569;
+  background: #0b1220;
+  color: var(--text);
+  padding: 0.6rem;
+}
+
+button {
+  background: linear-gradient(135deg, #ff8a00, #f59e0b);
+  color: #111827;
+  font-weight: 700;
+  border: 0;
+}
+
+.output {
+  white-space: pre-wrap;
+  background: #020617;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 0.6rem;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.events ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.events li {
+  font-size: 0.8rem;
+  border-bottom: 1px solid #1e293b;
+  padding: 0.4rem 0;
+}
+
+.muted { color: var(--muted); }
