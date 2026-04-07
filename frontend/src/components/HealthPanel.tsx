@@ -68,7 +68,8 @@ export function HealthPanel({ run }: Props) {
 
   return (
     <section className="panel ops-panel">
-      <h2>Mission Control</h2>
+      <h2>Operational Health</h2>
+      <p className="muted">System readiness, active agent roster, integration state, and live graph scale.</p>
 
       <div className="metric-grid">
         <article>
@@ -108,7 +109,7 @@ export function HealthPanel({ run }: Props) {
         </article>
       </div>
 
-      <h3>Agent Grid</h3>
+      <h3>Agent Roster</h3>
       <ul className="health-list">
         {Object.values(agents).map((agent) => (
           <li key={agent.id}>
@@ -123,7 +124,7 @@ export function HealthPanel({ run }: Props) {
         ))}
       </ul>
 
-      <h3>System Health</h3>
+      <h3>Dependencies</h3>
       <ul className="health-list">
         {Object.entries(health?.dependencies ?? {}).map(([name, status]) => (
           <li key={name}>

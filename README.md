@@ -1,271 +1,842 @@
-# LangGraph Multi-Agent Knowledge Graph Demo
+# KG Multi-Agent Demo
 
-Production-style demo of a multi-agent AI system with:
-- LangGraph orchestration (`coordinator -> researcher -> critic -> writer`)
-- Neo4j knowledge graph lineage
-- Zep long-term memory
-- FastAPI backend + React mission-control frontend
-- Voice input/output with live waveform UI
-- Provider-aware LLM routing and per-agent model assignment
+A Dockerized multi-agent AI demo built around LangGraph orchestration, Neo4j lineage, Zep memory, provider-aware model routing, voice interaction, and a React operations dashboard.
 
-## 1) What This Project Does
+This repository is not a thin mockup. It contains a working end-to-end system with:
+- a coordinator/researcher/critic/writer workflow
+- graph + memory persistence
+- realtime event streaming
+- configurable agent identities and model assignments
+- voice input/output
+- open-model discovery via Hugging Face
+- avatar video generation via HeyGen
+- desktop automation workflows and local artifact generation
+- Google Workspace ingestion with OAuth-backed Gmail/Calendar workflows
+- scheduleable desktop workflow policies with backend dispatch support
 
-This app runs autonomous AI workflows with reliability controls and observability:
-- Starts a run from user task input (`simulation` or `live` mode)
-- Routes task through agent nodes with conditional edges and retry handling
-- Updates graph + memory during execution
-- Streams run events to the UI via SSE
-- Renders graph/health/memory dashboards in real time
+The app is designed as a live demo and architecture sandbox, not as a safety-critical production system.
 
-It is designed for **greenfield autonomy demos** and architecture prototyping, not financial or safety-critical production operation.
+## Contents
+- [What It Does](#what-it-does)
+- [Current Capabilities](#current-capabilities)
+- [Architecture](#architecture)
+- [Repository Layout](#repository-layout)
+- [Runtime Services](#runtime-services)
+- [Frontend Overview](#frontend-overview)
+- [Backend API](#backend-api)
+- [Agent Workflow](#agent-workflow)
+- [Memory And Graph Model](#memory-and-graph-model)
+- [Model Providers](#model-providers)
+- [Voice And Speech](#voice-and-speech)
+- [HeyGen And LiveAvatar](#heygen-and-liveavatar)
+- [Hugging Face Integration](#hugging-face-integration)
+- [Environment Variables](#environment-variables)
+- [Local Development](#local-development)
+- [Docker Usage](#docker-usage)
+- [Railway Deployment](#railway-deployment)
+- [Operational Notes](#operational-notes)
+- [Testing And Validation](#testing-and-validation)
+- [Known Limitations](#known-limitations)
+- [Troubleshooting](#troubleshooting)
 
-## 2) Core Features
+## What It Does
 
-### 2.1 Multi-Agent Orchestration
-- Coordinator: task classification + planning
-- Researcher: evidence and context gathering
-- Critic: quality gate with optional revision loop
-- Writer: final synthesis and spoken response
-- Degraded handler: fallback output if retries are exhausted
+The application accepts a user task or spoken prompt and routes it through a LangGraph workflow.
 
-### 2.2 Reliability
-- Tenacity retries on node/tool failures
-- Exponential backoff with jitter
-- Degraded path + explicit run status (`degraded`) when needed
-- Run persistence in Postgres-backed run store flow
+Typical run behavior:
+1. The coordinator classifies the task, plans the route, and establishes memory/thread context.
+2. The researcher gathers evidence from tools, memory, and graph state.
+3. The critic evaluates quality, coverage, and risk, and can send the workflow back for revision.
+4. The writer produces the final response and a spoken-response variant.
+5. The app writes graph lineage, claims, entities, tool executions, and memory episodes during the run.
+6. The frontend shows live events, graph updates, health, and memory state.
 
-### 2.3 Memory + Graph
-- Zep Cloud for long-term recall/write
-- Neo4j for run, claim, source, and tool lineage
-- Graph updates emitted during and after runs
+The demo supports both ordinary conversation and structured task execution.
 
-### 2.4 Voice + UI
-- Browser speech recognition input
-- Neural TTS endpoint with OpenAI fallback pathing
-- Live “wave of dots” visualizer
-- Echo suppression and duplicate-utterance prevention
+## Current Capabilities
 
-### 2.5 Provider-Aware LLM Routing
-- Supports OpenAI, Anthropic, Google Gemini, Perplexity, xAI Grok, Groq
-- Per-agent provider/model config in UI (Agent Studio)
-- Provider catalog endpoint and health visibility
-
-### 2.6 Agent Studio
-- Rename each agent
-- Set avatar per agent (emoji/text/image URL)
-- Configure function/provider/model per agent
-- Visual org chart of agent hierarchy
-
-## 3) System Architecture
-
-### 3.1 Services
-- `api` (FastAPI): run orchestration API, SSE, config endpoints, speech endpoint
-- `worker` (Celery): async background jobs and queue processing
-- `neo4j`: graph database
-- `postgres`: persistence/checkpoint substrate
-- `redis`: queue/cache/broker role
-- `frontend` (Vite/React served via nginx): mission-control dashboard
-
-### 3.2 Workflow Graph
+### Multi-agent execution
 - `coordinator -> researcher -> critic -> writer`
-- Conditional routes:
-  - `researcher -> critic` if evidence threshold passes
-  - `critic -> researcher` for revisions (bounded by max loops)
-  - `critic -> writer` when quality pass
-  - Any hard/retry-exhausted failure -> `degraded`
+- conditional revision loop from critic back to researcher
+- degraded fallback path on repeated failure
+- task classification so normal conversation is not forced through research templates
 
-### 3.3 Data Planes
-- Runtime state: `AgentState` in graph execution
-- Long-term memory: Zep
-- Knowledge graph: Neo4j
-- UI telemetry: SSE stream from `/runs/{id}/events`
+### Graph and memory
+- Neo4j run/thread/episode/claim/entity lineage
+- Zep long-term memory integration
+- thread-aware memory recall
+- episode timeline and claim surfacing in UI
 
-## 4) Repository Layout
+### Voice interaction
+- browser speech recognition for input
+- browser speech synthesis
+- OpenAI neural TTS
+- ElevenLabs integration path
+- Hugging Face Parler TTS integration path
+- speaking/listening visualizer modes
+- interruption handling and duplicate/echo suppression
+
+### Provider-aware routing
+- OpenAI
+- Anthropic
+- Google Gemini support path
+- Perplexity support path
+- xAI support path
+- Groq support path
+- OpenRouter
+- Transformers-local integration hook
+- optional Optimum hook for local acceleration
+
+### UI configuration
+- editable agent names
+- per-agent avatars:
+  - emoji/text
+  - image URL
+  - local file upload
+- per-agent speech settings
+- per-agent model/provider assignment
+- org-chart display of agent hierarchy
+- theme selector
+
+### Desktop operations
+- per-agent local app specialization policies
+- host-bridge aware desktop execution model
+- local writer doc generation
+- local social package generation
+- Gmail/Calendar desktop workflows
+- AI Influencer desktop packaging
+- desktop action history with filtering
+- bridge diagnostics for Finder, Word, and AI Influencer launch
+- persisted desktop workflow schedules
+
+### External integrations
+- HeyGen video generation
+- HeyGen asset selection and per-agent mapping
+- Hugging Face hub/dataset/Spaces search
+- Google Workspace OAuth connect flow for Gmail/Calendar readonly workflows
+
+## Google Workspace Setup
+
+The app now supports a local OAuth flow for Gmail and Google Calendar.
+
+What it does:
+- opens a Google consent screen from the app
+- receives the callback at the backend
+- stores the Google refresh/access token locally
+- refreshes access automatically for Gmail/Calendar desktop workflows
+
+### 1. Create Google OAuth credentials
+
+In Google Cloud Console:
+1. Create or choose a project
+2. Enable:
+   - Gmail API
+   - Google Calendar API
+3. Go to `APIs & Services -> Credentials`
+4. Create an `OAuth client ID`
+5. Choose `Web application`
+6. Add this authorized redirect URI exactly:
+
+```text
+http://localhost:8000/google/oauth/callback
+```
+
+### 2. Add env vars
+
+In the project root `.env`:
+
+```env
+GOOGLE_OAUTH_CLIENT_ID=your_google_client_id
+GOOGLE_OAUTH_CLIENT_SECRET=your_google_client_secret
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/google/oauth/callback
+```
+
+Optional manual override:
+
+```env
+GOOGLE_WORKSPACE_ACCESS_TOKEN=
+```
+
+The normal path should be OAuth, not manual token entry.
+
+### 3. Connect from the UI
+
+1. Open `Studio -> Desktop`
+2. Click `Connect Google Workspace`
+3. Sign in with Google
+4. Approve:
+   - Gmail readonly
+   - Calendar readonly
+5. Return to the app
+
+The Desktop panel will then show:
+- connected state
+- token source
+- expiry
+- granted scope
+- whether refresh is available
+
+### 4. Supported Google action types
+
+The Gmail / Calendar workflow supports:
+- `snapshot`
+- `inbox_triage`
+- `agenda_brief`
+- `conflict_scan`
+- `morning_brief`
+- `draft_reply_suggestions`
+
+These produce local markdown output in the desktop exports folder under:
+
+```text
+backend/data/exports/gmail_calendar/
+```
+
+`morning_brief` combines inbox priorities, upcoming calendar items, and detected conflicts into one operator-friendly brief.
+
+`draft_reply_suggestions` does not send email. It produces local reply recommendations only.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U["User / Voice Input"] --> FE["React Frontend"]
+    FE --> API["FastAPI API"]
+    API --> LG["LangGraph Workflow"]
+    LG --> C["Coordinator"]
+    C --> R["Researcher"]
+    R --> K["Neo4j Graph"]
+    R --> M["Zep Memory"]
+    R --> T["Tool Adapters"]
+    R --> CR["Critic"]
+    CR -->|revise| R
+    CR -->|pass| W["Writer"]
+    W --> API
+    API --> FE
+    API --> KG["Graph Writes"]
+    API --> ZM["Memory Writes"]
+    API --> TTS["Speech Providers"]
+    API --> HG["HeyGen"]
+    W --> TTS
+```
+
+The backend is built around explicit service layers rather than a monolithic agent framework.
+
+## Repository Layout
 
 ```text
 backend/
   app/
-    agents/               # node logic + routing conditions
-    api/                  # FastAPI routes
-    core/                 # settings/config
-    graph/                # state + workflow definition
-    repositories/         # run persistence abstraction
-    services/             # llm/memory/neo4j/tts/model-router/agent-profiles
-    tools/                # external tool adapters
-    workers/              # celery app/tasks
+    agents/
+      nodes.py                 # agent node logic and speech shaping
+    api/
+      routes.py                # FastAPI routes
+    core/
+      config.py                # environment-driven settings
+    graph/
+      state.py                 # AgentState schema
+    models/
+      schemas.py               # API and profile schemas
+    repositories/
+      run_store.py             # durable run persistence
+    services/
+      agent_profile_service.py # agent config persistence
+      heygen_service.py        # HeyGen API integration
+      huggingface_service.py   # HF Hub, Parler, local transformers hooks
+      memory_service.py        # Zep thread memory
+      model_router_service.py  # provider/model resolution
+      neo4j_service.py         # graph writes and reads
+      run_service.py           # run lifecycle
+      tts_service.py           # routed speech synthesis
+    tools/
+      adapters.py              # tool adapters and discovery tools
+    workers/
+      celery_app.py            # Celery worker bootstrap
 frontend/
   src/
-    components/           # RunConsole, Graph, Health, Memory, AgentStudio
-    api/                  # frontend API client
+    components/
+      RunConsole.tsx
+      HealthPanel.tsx
+      GraphPanel.tsx
+      MemoryPanel.tsx
+      AgentStudio.tsx
+      HuggingFacePanel.tsx
+      HeyGenPanel.tsx
+    api/
+      client.ts
+    lib/
+      presets.ts
+      themes.ts
+      voice.ts
+    types.ts
 infra/
-  docker-compose.yml      # local multi-service stack
-desktop/
-  # desktop wrapper assets
+  docker-compose.yml
+README.md
+.env.example
 ```
 
-## 5) API Reference
+## Runtime Services
+
+### `api`
+FastAPI service that exposes:
+- runs
+- events
+- graph
+- memory
+- health
+- speech
+- agent configuration
+- provider catalog
+- Hugging Face search
+- HeyGen video/live endpoints
+
+### `worker`
+Celery worker for queued/background work.
+
+### `neo4j`
+Operational graph store for:
+- runs
+- threads
+- episodes
+- claims
+- entities
+- tool executions
+- provenance relationships
+
+### `postgres`
+Persistence substrate used by the app and runtime services.
+
+### `redis`
+Broker/cache role for queueing and background workflows.
+
+### `frontend`
+React + Vite app served in Docker through nginx.
+
+## Frontend Overview
+
+The frontend is intentionally split into workspace tabs so the screen is not overloaded.
+
+### 1. Mission Control
+Primary interaction area.
+
+Includes:
+- voice controls
+- visualizer
+- run prompt and mode
+- live event stream
+- transcript
+- mission templates
+
+### 2. Graph And Memory
+Observability and reasoning state.
+
+Includes:
+- live graph view
+- graph filters/search
+- thread context
+- recalled memory references
+- entities
+- claims
+- episode timeline
+- desktop artifacts
+- recent thread messages
+
+### 3. Specialist Boards
+Focused operator views.
+
+Includes:
+- Shopping Board
+- Social Ops
+
+### 4. Studio
+Configuration and external system surfaces.
+
+Includes:
+- Agent Studio
+- Hugging Face search panel
+- HeyGen panel
+- Desktop Ops
+- Desktop History
+
+## Backend API
 
 ### Runs
 - `POST /runs`
-  - Body: `{ task, mode, user_id?, session_id? }`
-  - Starts workflow run
+  - starts a run
+  - body: `{"task": string, "mode": "simulation" | "live"}`
 - `GET /runs/{run_id}`
-  - Returns run status, state snapshot, and output
+  - returns run detail, state, output, timestamps
 - `GET /runs/{run_id}/events`
-  - SSE stream of node/system events
-- `GET /runs/{run_id}/speech?voice=alloy&fmt=mp3`
-  - Returns synthesized speech audio for spoken response
+  - SSE event stream
+- `GET /runs/{run_id}/speech`
+  - synthesized speech for the run response
 
-### Observability
-- `GET /graph?limit=100`
-  - Returns graph subgraph for visualization
+### Memory and graph
+- `GET /runs/{run_id}/memory`
+- `GET /runs/{run_id}/claims`
+- `GET /threads/{thread_id}`
+- `GET /graph?limit=...&run_id=...&thread_id=...`
+
+### Desktop ops
+- `GET /desktop/status`
+- `GET /desktop/actions`
+- `POST /desktop/actions/writer-doc`
+- `POST /desktop/actions/social-package`
+- `POST /desktop/actions/gmail-calendar`
+- `POST /desktop/actions/ai-influencer`
+- `POST /desktop/actions/{action_id}/execute`
+- `POST /desktop/actions/{action_id}/open`
+- `POST /desktop/actions/{action_id}/reveal`
+- `GET /desktop/bridge/status`
+- `GET /desktop/bridge/diagnostics`
+- `POST /desktop/bridge/test`
+- `POST /desktop/bridge/test/{kind}`
+- `GET /desktop/schedules`
+- `POST /desktop/schedules`
+- `POST /desktop/schedules/dispatch`
+
+### Config and health
 - `GET /health`
-  - Returns service + provider enablement status
-
-### Provider/Agent Configuration
 - `GET /providers/catalog`
-  - Providers, enabled state, known models, recommended role mappings
 - `GET /agents/config`
-  - Current agent profile map
 - `PUT /agents/config`
-  - Update agent names, avatars, function text, provider, model
 
-## 6) Environment Variables
+### Hugging Face
+- `GET /hf/status`
+- `GET /hf/models`
+- `GET /hf/datasets`
+- `GET /hf/spaces`
 
-Copy `.env.example` to `.env` and set values:
+### HeyGen
+- `GET /heygen/assets`
+- `POST /heygen/videos`
+- `GET /heygen/videos/{video_id}`
+- `POST /heygen/live/session`
+- `POST /heygen/live/start`
+- `POST /heygen/live/task`
+- `POST /heygen/live/stop`
 
-### Required for baseline
-- `OPENAI_API_KEY` (if using OpenAI for chat/TTS)
-- `ZEP_API_KEY` (if using memory)
-- `NEO4J_*`, `POSTGRES_DSN`, `REDIS_URL` (provided by compose defaults)
+## Agent Workflow
 
-### Multi-provider keys (optional but recommended)
+The current workflow is stateful and conditional.
+
+### Coordinator
+Responsibilities:
+- classify task type
+- establish memory/thread context
+- choose route
+- assign baseline plan metadata
+
+### Researcher
+Responsibilities:
+- gather evidence
+- call tools
+- query memory/graph context
+- collect sources and findings
+
+### Critic
+Responsibilities:
+- inspect coverage and factual quality
+- request revision if needed
+- emit pass/fail verdict
+
+### Writer
+Responsibilities:
+- produce final answer
+- shape spoken response variant
+- emit speech preview events
+
+### Degraded handler
+Responsibilities:
+- recover from repeated failures
+- produce fallback output
+- mark run state explicitly
+
+## Memory And Graph Model
+
+### Neo4j entities
+Current graph model includes:
+- `Run`
+- `Thread`
+- `Episode`
+- `Entity`
+- `Claim`
+- `Source`
+- `ToolExecution`
+- `Agent`
+- `DesktopArtifact`
+
+Typical relationships include:
+- `HAS_EPISODE`
+- `CONTAINS`
+- `MENTIONS`
+- `PRODUCED`
+- `SUPPORTED_BY`
+- `CHALLENGED_BY`
+- `ABOUT`
+- `AUTHORED`
+- `GENERATED`
+- `FAILED_AT`
+- `PRECEDES`
+
+### Zep memory
+The memory service is thread-aware rather than flat-session-only.
+
+The app stores and recalls:
+- user messages
+- run episodes
+- thread context
+- memory references
+- message history
+- desktop-generated artifacts that have been ingested back into the run
+- structured recall fields used by the workflow
+
+### Desktop artifact ingestion
+Completed desktop actions are no longer treated as terminal local file writes.
+
+The current ingestion path can pull content back into the graph and memory model for:
+- Gmail / Calendar snapshots and briefs
+- writer markdown documents
+- social package briefs
+- AI Influencer package briefs
+
+For ingested outputs, the system now creates:
+- a new `Episode`
+- a `DesktopArtifact` graph node
+- thread/message memory records in Zep
+- run-state references for UI recall
+
+## Model Providers
+
+The provider catalog is runtime-driven and exposed to the UI.
+
+### Implemented/available paths
+- OpenAI
+- Anthropic
+- OpenRouter
+- Google Gemini support path
+- Perplexity support path
+- xAI support path
+- Groq support path
+- Transformers-local hook
+
+### Role defaults
+Current recommended defaults are function-specific and surfaced in the API catalog.
+
+Examples:
+- coordinator -> fast routing model
+- researcher -> web/open-model friendly provider
+- critic -> strong analysis model
+- writer -> strong natural-language model
+- coding -> coder-oriented model
+
+### OpenRouter
+OpenRouter is integrated as an OpenAI-compatible provider path with curated OSS presets.
+
+The frontend includes preset packs for role-based OpenRouter routing.
+
+## Voice And Speech
+
+### Input
+- browser Web Speech recognition
+- silence-triggered run execution option
+- interruption handling
+- anti-echo / anti-repeat filtering
+
+### Output
+Supported engines in the UI:
+- `Neural (OpenAI)`
+- `Premium (ElevenLabs)`
+- `Parler TTS (HF)`
+- `Browser (local)`
+
+### Current voice behavior
+The system supports:
+- per-agent voice assignment
+- per-agent speech style
+- per-agent spoken persona
+- preview speech during active runs
+- final speech after completion
+
+### Important note
+Speech quality depends heavily on the selected provider.
+- browser voices can sound more natural on macOS for some use cases
+- OpenAI is integrated and usable
+- ElevenLabs path exists but requires its own key
+- Parler path exists, but HF inference responsiveness can vary
+
+## HeyGen And LiveAvatar
+
+### What is implemented
+- asset loading
+- avatar/voice selection
+- video generation from run output
+- per-agent avatar/voice mapping
+- auto-generation from writer responses
+
+### LiveAvatar state
+The code includes a migration path and session controls, but the older HeyGen interactive-avatar endpoints are deprecated.
+
+## Desktop Automation
+
+### Execution model
+Desktop automation in this project has three layers:
+1. local artifact generation in the backend container
+2. optional host bridge for macOS-native app control
+3. per-agent permission/specialization rules in Agent Studio
+
+The app can already generate local files reliably.
+
+Native app control such as opening Word or revealing Finder paths requires the host bridge because the main backend runs in Docker/Linux.
+
+### Current desktop action kinds
+- `writer_doc`
+- `social_package`
+- `gmail_calendar`
+- `ai_influencer`
+
+### Desktop history
+Desktop actions are persisted and exposed in the UI with:
+- action kind
+- owning agent
+- status
+- output path
+- execution history
+- last execution method
+- last error
+
+### Desktop schedules
+Desktop schedules are now persisted and dispatchable.
+
+Current supported scheduled workflow kinds:
+- `morning_brief`
+- `agenda_brief`
+- `inbox_triage`
+- `draft_reply_suggestions`
+
+Important constraint:
+- schedule persistence and backend dispatch are implemented
+- this is not yet a full user-facing automation product with recurrence editing, inbox items, and approval routing
+- it is a backend scheduler plus UI policy layer designed to be expanded
+
+## Host Bridge
+
+The host bridge is a separate macOS-side service used to bridge Docker to local desktop apps.
+
+Current capabilities:
+- Word open
+- Finder reveal
+- generic file open
+- browser open
+- app open by name
+- app open by full path
+
+Current diagnostics:
+- overall bridge reachability
+- Finder test
+- Word test
+- AI Influencer launch test
+
+Bridge code lives in:
+- [host_bridge/server.py](/Users/matt/Documents/new-project/host_bridge/server.py)
+- [host_bridge/README.md](/Users/matt/Documents/new-project/host_bridge/README.md)
+
+You should treat LiveAvatar as a separate product path from standard HeyGen video generation.
+
+### Pricing status
+Based on HeyGen help-center docs current as of April 6, 2026:
+- standard HeyGen API pricing is separate from LiveAvatar pricing
+- free API credits are no longer generally offered
+- LiveAvatar migration docs mention a limited free migration/testing period, then paid plans after that
+
+References:
+- [HeyGen API pricing explained](https://help.heygen.com/en/articles/10060327-heygen-api-pricing-explained)
+- [Interactive Avatar Migration to LiveAvatar: Guide and FAQ](https://help.heygen.com/en/articles/12998652-interactive-avatar-migration-to-liveavatar-guide-and-faq)
+
+## Hugging Face Integration
+
+### Implemented
+- Hub search for models
+- dataset search
+- Spaces search
+- Parler TTS backend integration
+- transformers-local provider hook
+- optional optimum acceleration hook
+- agent discovery tool integration
+
+### Current runtime expectation
+- Hub search works in the default stack
+- Parler TTS is wired in, but inference latency may vary
+- transformers-local and optimum remain disabled unless a local inference runtime is installed
+
+## Environment Variables
+
+Copy `.env.example` to `.env`.
+
+### Core
+- `OPENAI_API_KEY`
+- `ZEP_API_KEY`
+- `NEO4J_URI`
+- `NEO4J_USER`
+- `NEO4J_PASSWORD`
+- `POSTGRES_DSN`
+- `REDIS_URL`
+
+### Provider keys
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_API_KEY`
 - `PERPLEXITY_API_KEY`
 - `XAI_API_KEY`
 - `GROQ_API_KEY`
+- `OPENROUTER_API_KEY`
+- `HUGGINGFACE_API_KEY`
 
-### Model defaults
-- `OPENAI_MODEL`
-- `ANTHROPIC_MODEL`
-- `GOOGLE_MODEL`
-- `PERPLEXITY_MODEL`
-- `XAI_MODEL`
-- `GROQ_MODEL`
+### Voice
+- `OPENAI_TTS_MODEL`
+- `OPENAI_TTS_VOICE`
+- `ELEVENLABS_API_KEY`
+- `ELEVENLABS_VOICE_ID`
+- `PARLER_TTS_MODEL`
+- `PARLER_TTS_VOICE_DESCRIPTION`
 
-### Side effects
-- `SIDE_EFFECT_DEFAULT_MODE`
-- `SIDE_EFFECT_LIVE_TOOLS_CSV`
+### Local HF inference hooks
+- `TRANSFORMERS_LOCAL_MODEL`
+- `TRANSFORMERS_DEVICE`
+- `TRANSFORMERS_USE_OPTIMUM`
+- `TRANSFORMERS_MAX_NEW_TOKENS`
 
-## 7) Local Setup
+### HeyGen
+- `HEYGEN_API_KEY`
+- `HEYGEN_BASE_URL`
+- `HEYGEN_AVATAR_ID`
+- `HEYGEN_VOICE_ID`
 
-### 7.1 Docker (recommended)
-```bash
-cp .env.example .env
-docker compose -f infra/docker-compose.yml up --build
-```
+## Local Development
 
-Open:
-- Frontend: `http://localhost:5173`
-- API docs: `http://localhost:8000/docs`
-- Neo4j browser: `http://localhost:7474`
-
-### 7.2 Backend local dev
+### Backend
 ```bash
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .[dev]
+pip install -e .
 uvicorn app.main:app --reload
 ```
 
-### 7.3 Frontend local dev
+### Frontend
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-## 8) Using Agent Studio
+### Recommended local URLs
+- frontend: `http://localhost:5173`
+- API: `http://localhost:8000`
+- Neo4j Browser: `http://localhost:7474`
 
-1. Open Agent Studio panel.
-2. For each agent (`coordinator`, `researcher`, `critic`, `writer`, `coding`):
-   - Set `name`
-   - Set `avatar` (emoji/text/image URL)
-   - Set provider/model
-   - Save
-3. Org chart at top reflects current hierarchy and avatars.
+## Docker Usage
 
-## 9) Recommended Provider Mapping
+Start the full stack:
 
-Default suggested mapping for this project:
-- Coordinator -> OpenAI (fast routing/planning)
-- Researcher -> Perplexity (web-grounded retrieval style)
-- Critic -> Anthropic (analysis/critique behavior)
-- Writer -> Gemini or OpenAI (style/format quality)
-- Coding -> Claude/OpenAI Codex-style model
+```bash
+docker compose -f infra/docker-compose.yml up --build
+```
 
-You can override everything in Agent Studio.
+Rebuild only API + frontend:
 
-## 10) Validation Checklist
+```bash
+docker compose -f infra/docker-compose.yml up -d --build api frontend
+```
 
-- Run starts from UI and completes
-- At least one conversational prompt routes as `task_type=conversation`
-- Market prompt routes as `task_type=market_research`
-- `/providers/catalog` returns enabled/disabled providers correctly
-- Agent rename/avatar changes persist after refresh
-- Waveform visibly pulses while listening and speaking
+Rebuild with forced recreation if Docker keeps stale containers around:
 
-## 11) Deployment (Railway)
+```bash
+docker compose -f infra/docker-compose.yml up -d --build --force-recreate api frontend
+```
 
-Use the same environment contract as local.
+## Railway Deployment
 
-Recommended service split:
-- `api` service (FastAPI)
-- `worker` service (Celery)
-- `frontend` service (static nginx)
-- managed or self-hosted `postgres`, `redis`, `neo4j`
+The project is structured for multi-service deployment.
 
-Deployment notes:
-- Set all provider API keys in Railway variables
-- Keep `mode=simulation` as default in public demos
-- Restrict live side effects with explicit tool allowlist
+Recommended services:
+- frontend
+- api
+- worker
+- postgres
+- redis
+- neo4j
 
-## 12) Security and Safety Notes
+Recommended public-demo defaults:
+- keep run mode defaulted to `simulation`
+- restrict live side effects
+- do not expose raw admin/provider secrets client-side
 
-- Do not commit real secrets (`.env`)
-- Keep `simulation` default in demos
-- Gate `live` mode tools by explicit allowlist
-- Add auth/rate limits before exposing publicly
-- Treat generated outputs as assistive; verify before external actions
+## Operational Notes
 
-## 13) Troubleshooting
+### Voice quality
+If you want materially more human speech, provider choice matters more than prompt wording.
 
-### 13.1 Conversation quality degrades or becomes generic
-- Check provider key validity and quota
-- Verify selected model exists for selected provider
-- Inspect `/health` and `/providers/catalog`
+Priority order:
+1. premium TTS provider
+2. tuned browser voice on macOS
+3. OpenAI TTS
+4. Parler path when latency is acceptable
 
-### 13.2 Speech loops/repetition
-- Confirm latest frontend build is running
-- Use `Stop Listening` while tuning mic gain
-- Keep browser tab focused for stable WebSpeech behavior
+### Local model path
+`transformers-local` and `optimum` are scaffolding hooks unless you install a local runtime with `torch` and possibly ONNX runtime.
 
-### 13.3 Avatar image not rendering
-- Ensure avatar value is a valid `https://` image URL or `data:image/...`
-- Check CORS and remote image availability
+### Print/PDF
+The frontend now includes print-specific CSS so exported PDFs are readable and not just a raw dump of the live dashboard layout.
 
-### 13.4 Neo4j or memory missing data
-- Verify connection vars and service health
-- Inspect backend logs for retries/degraded path messages
+## Testing And Validation
 
-## 14) Current Status
+### Manual checks
+- Start a run from the console
+- Verify live events update
+- Verify graph panel loads and filters
+- Verify memory panel loads run/thread context
+- Verify provider catalog surfaces enabled providers
+- Verify agent edits persist after refresh
+- Verify voice speaking/listening visualizer remains visible during speech
+- Verify PDF export uses print-friendly layout
 
-This repo includes:
-- Multi-agent graph orchestration
-- Memory + graph lineage integration
-- Provider/router abstraction and per-agent model config
-- Mission-control frontend with org chart + avatar customization
+### Automated checks used during development
+- `python3 -m py_compile ...` for backend syntax checks
+- `npm run build` for frontend build validation
 
-For production hardening, add authentication, authorization, multi-tenant controls, and observability/alerting.
+## Known Limitations
+
+- Speech quality is still bounded by the active TTS provider.
+- Parler TTS is integrated but HF inference latency can be inconsistent.
+- `transformers-local` is not active in the default Docker image.
+- LiveAvatar is a separate migration/pricing path from standard HeyGen video generation.
+- The worker/runtime path should be treated as a demo system until task registration and background behavior are hardened further.
+
+## Troubleshooting
+
+### UI text is clipped or hidden
+- hard refresh the frontend
+- ensure the rebuilt frontend container is the one currently running
+- reduce browser zoom and compare with the print layout if you are diagnosing export issues
+
+### Voice sounds robotic
+- try `Browser (local)` on macOS first
+- if available, add a premium TTS provider key
+- avoid long list-heavy prompts when evaluating speech quality
+
+### Visualizer stops during speech
+- confirm the latest frontend build is running
+- verify the selected voice engine is not failing over repeatedly
+- use the browser engine to test whether the issue is remote-audio-specific
+
+### Runs stay queued or never complete
+- inspect API and worker logs
+- verify Redis/Postgres are up
+- verify the worker has loaded the expected tasks
+
+### Hugging Face local models show disabled
+- expected unless you install local inference dependencies and configure a local model runtime
+
+### HeyGen video works but LiveAvatar does not
+- current platform behavior treats LiveAvatar as a separate migration/product path
+- standard HeyGen API enablement is not sufficient for all LiveAvatar usage

@@ -4,6 +4,8 @@ services:
       context: ../backend
     env_file:
       - ../.env
+    volumes:
+      - ../backend/data:/app/data
     ports:
       - "8000:8000"
     depends_on:
@@ -19,6 +21,8 @@ services:
       context: ../backend
     env_file:
       - ../.env
+    volumes:
+      - ../backend/data:/app/data
     command: celery -A app.workers.celery_app.celery_app worker -l info
     depends_on:
       - api

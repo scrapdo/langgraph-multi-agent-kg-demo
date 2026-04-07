@@ -10,6 +10,12 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .venv/
+build/
+dist/
+*.egg-info/
+backend/build/
+backend/data/
+backend/*.egg-info/
 
 # Node
 node_modules/
