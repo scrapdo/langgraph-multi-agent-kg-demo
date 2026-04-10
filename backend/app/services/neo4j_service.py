@@ -51,6 +51,7 @@ class Neo4jService:
             "CREATE CONSTRAINT claim_id IF NOT EXISTS FOR (c:Claim) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT tool_execution_id IF NOT EXISTS FOR (te:ToolExecution) REQUIRE te.id IS UNIQUE",
             "CREATE CONSTRAINT desktop_artifact_id IF NOT EXISTS FOR (da:DesktopArtifact) REQUIRE da.id IS UNIQUE",
+            "CREATE CONSTRAINT schedule_id IF NOT EXISTS FOR (sc:Schedule) REQUIRE sc.id IS UNIQUE",
             "CREATE CONSTRAINT source_url IF NOT EXISTS FOR (s:Source) REQUIRE s.url IS UNIQUE",
             "CREATE CONSTRAINT entity_canonical_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.canonical_name IS UNIQUE",
         ]
@@ -405,6 +406,87 @@ class Neo4jService:
             ).single()
         return str(record["artifact_id"]) if record else artifact_id
 
+    def upsert_schedule(
+        self,
+        schedule_id: str,
+        *,
+        name: str,
+        workflow_kind: str,
+        agent_id: str,
+        enabled: bool,
+        mode: str,
+        approval_required: bool,
+        cadence_label: str,
+        output_preset: str = "custom",
+        output_subdir: str = "",
+        template_preset: str = "none",
+        prompt_template: str = "",
+        content_template: str = "",
+        last_run_status: str = "",
+        next_run_at: str = "",
+    ) -> None:
+        self._ensure_constraints()
+        query = """
+        MERGE (sc:Schedule {id: $schedule_id})
+        ON CREATE SET sc.created_at = datetime()
+        SET sc.name = $name,
+            sc.workflow_kind = $workflow_kind,
+            sc.agent_id = $agent_id,
+            sc.enabled = $enabled,
+            sc.mode = $mode,
+            sc.approval_required = $approval_required,
+            sc.cadence_label = $cadence_label,
+            sc.output_preset = $output_preset,
+            sc.output_subdir = $output_subdir,
+            sc.template_preset = $template_preset,
+            sc.prompt_template = $prompt_template,
+            sc.content_template = $content_template,
+            sc.last_run_status = $last_run_status,
+            sc.next_run_at = $next_run_at,
+            sc.updated_at = datetime()
+        WITH sc
+        MERGE (a:Agent {name: $agent_id})
+        MERGE (sc)-[:OWNED_BY]->(a)
+        """
+        with self._driver.session() as session:
+            session.run(
+                query,
+                schedule_id=schedule_id,
+                name=name,
+                workflow_kind=workflow_kind,
+                agent_id=agent_id,
+                enabled=enabled,
+                mode=mode,
+                approval_required=approval_required,
+                cadence_label=cadence_label,
+                output_preset=output_preset,
+                output_subdir=output_subdir,
+                template_preset=template_preset,
+                prompt_template=prompt_template,
+                content_template=content_template,
+                last_run_status=last_run_status,
+                next_run_at=next_run_at,
+            )
+
+    def link_schedule_to_run(self, schedule_id: str, run_id: str) -> None:
+        self._ensure_constraints()
+        query = """
+        MATCH (sc:Schedule {id: $schedule_id})
+        MATCH (r:Run {id: $run_id})
+        MERGE (sc)-[:DISPATCHED_RUN]->(r)
+        """
+        with self._driver.session() as session:
+            session.run(query, schedule_id=schedule_id, run_id=run_id)
+
+    def delete_schedule(self, schedule_id: str) -> None:
+        self._ensure_constraints()
+        query = """
+        MATCH (sc:Schedule {id: $schedule_id})
+        DETACH DELETE sc
+        """
+        with self._driver.session() as session:
+            session.run(query, schedule_id=schedule_id)
+
     def fetch_graph(self, limit: int = 100, run_id: str | None = None, thread_id: str | None = None, labels: list[str] | None = None) -> dict[str, Any]:
         self._ensure_constraints()
         labels = labels or []
@@ -417,6 +499,7 @@ class Neo4jService:
                 OPTIONAL MATCH (r)-[:PRODUCED]->(c:Claim)
                 OPTIONAL MATCH (r)-[:USED_TOOL]->(te:ToolExecution)
                 OPTIONAL MATCH (r)-[:GENERATED]->(da:DesktopArtifact)
+                OPTIONAL MATCH (sc:Schedule)-[:DISPATCHED_RUN]->(r)
                 OPTIONAL MATCH (ep)<-[:AUTHORED]-(author:Agent)
                 OPTIONAL MATCH (ep)-[:MENTIONS]->(entity_from_episode:Entity)
                 OPTIONAL MATCH (ep)-[:USED_TOOL]->(tool_from_episode:ToolExecution)
@@ -427,7 +510,7 @@ class Neo4jService:
                 OPTIONAL MATCH (c)-[:ABOUT]->(claim_entity:Entity)
                 OPTIONAL MATCH (c)-[:SUPPORTED_BY]->(claim_source:Source)
                 WITH [
-                    r, t, ep, c, te, da, author, entity_from_episode, tool_from_episode,
+                    r, t, ep, c, te, da, sc, author, entity_from_episode, tool_from_episode,
                     claim_from_episode, artifact_from_episode, entity_from_claim, source_from_claim, claim_entity, claim_source
                 ] AS grouped
                 UNWIND grouped AS candidate

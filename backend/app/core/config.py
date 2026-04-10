@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
-    tts_provider_default: str = "openai"
+    tts_provider_default: str = "elevenlabs"
 
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-3-7-sonnet-latest"
@@ -51,11 +51,6 @@ class Settings(BaseSettings):
     elevenlabs_tts_model: str = "eleven_multilingual_v2"
     elevenlabs_voice_id: str = ""
 
-    heygen_api_key: str = ""
-    heygen_base_url: str = "https://api.heygen.com"
-    heygen_avatar_id: str = ""
-    heygen_voice_id: str = ""
-
     zep_api_key: str = ""
     zep_base_url: str = "https://api.getzep.com"
 
@@ -82,6 +77,9 @@ class Settings(BaseSettings):
     run_store_path: str = "data/runs.json"
     desktop_action_store_path: str = "data/desktop_actions.json"
     desktop_schedule_store_path: str = "data/desktop_schedules.json"
+    browser_workflow_store_path: str = "data/browser_workflows.json"
+    browser_script_store_path: str = "data/browser_scripts.json"
+    scheduler_store_path: str = "data/scheduler.json"
     desktop_output_dir: str = "data/exports"
     host_automation_base_url: str = ""
     host_automation_token: str = ""
@@ -99,6 +97,24 @@ class Settings(BaseSettings):
     ai_influencer_app_url: str = ""
     ai_influencer_app_name: str = ""
     ai_influencer_app_path: str = ""
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
+    telnyx_api_key: str = ""
+    telnyx_phone_number: str = ""
+    telnyx_connection_id: str = ""
+    sendgrid_api_key: str = ""
+    secretary_email_from: str = ""
+    telegram_bot_token: str = ""
+    telegram_default_chat_id: str = ""
+    secretary_test_store_path: str = "data/secretary_tests.json"
+    secretary_contact_store_path: str = "data/secretary_contacts.json"
+    github_token: str = ""
+    github_owner: str = ""
+    github_repo: str = ""
+    github_project_id: str = ""
+    browser_verify_ssl: bool = False
+    playwright_headless: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

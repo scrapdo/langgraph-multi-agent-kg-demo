@@ -77,6 +77,20 @@ export const DEFAULT_MISSION_TEMPLATES: MissionTemplate[] = [
     mode: 'simulation',
   },
   {
+    id: 'secretary-ops',
+    name: 'Secretary',
+    description: 'Prepare calls, texts, follow-ups, and scheduling actions through the secretary agent.',
+    task: 'Act as my secretary. Prepare the best next call, text, and email follow-ups needed to book or confirm appointments.',
+    mode: 'simulation',
+  },
+  {
+    id: 'wellness-coach',
+    name: 'Wellness Coach',
+    description: 'Set practical goals, habit anchors, accountability prompts, and motivation for the week.',
+    task: 'Act as my wellness coach. Help me set one realistic anchor habit, one movement goal, one recovery goal, and one accountability question for this week.',
+    mode: 'simulation',
+  },
+  {
     id: 'live-mission',
     name: 'Live Mission',
     description: 'Prepare a run intended for approved live tools.',
@@ -115,6 +129,8 @@ export function buildCuratedOpenRouterPresets(baseAgents: Record<string, AgentPr
         coding: { provider: 'openrouter', model: 'qwen/qwen-2.5-coder-32b-instruct' },
         shopper: { provider: 'openrouter', model: 'qwen/qwen-2.5-72b-instruct' },
         social: { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct' },
+        secretary: { provider: 'anthropic', model: 'claude-3-7-sonnet-latest' },
+        wellness: { provider: 'anthropic', model: 'claude-3-7-sonnet-latest' },
       }),
     },
     {
@@ -129,6 +145,8 @@ export function buildCuratedOpenRouterPresets(baseAgents: Record<string, AgentPr
         coding: { provider: 'openrouter', model: 'qwen/qwen-2.5-coder-32b-instruct' },
         shopper: { provider: 'openrouter', model: 'deepseek/deepseek-r1-distill-llama-70b' },
         social: { provider: 'openrouter', model: 'google/gemma-3-27b-it' },
+        secretary: { provider: 'anthropic', model: 'claude-3-7-sonnet-latest' },
+        wellness: { provider: 'anthropic', model: 'claude-3-7-sonnet-latest' },
       }),
     },
     {
@@ -143,6 +161,8 @@ export function buildCuratedOpenRouterPresets(baseAgents: Record<string, AgentPr
         coding: { provider: 'openrouter', model: 'qwen/qwen-2.5-coder-32b-instruct' },
         shopper: { provider: 'openrouter', model: 'google/gemma-3-27b-it' },
         social: { provider: 'openrouter', model: 'google/gemma-3-12b-it' },
+        secretary: { provider: 'anthropic', model: 'claude-3-7-sonnet-latest' },
+        wellness: { provider: 'anthropic', model: 'claude-3-7-sonnet-latest' },
       }),
     },
   ];

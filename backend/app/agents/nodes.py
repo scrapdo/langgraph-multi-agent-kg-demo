@@ -16,8 +16,10 @@ from app.services.agent_profile_service import agent_profile_service
 from app.services.llm_service import build_llm_for_agent
 from app.services.memory_service import memory_service
 from app.services.neo4j_service import neo4j_service
+from app.services.playwright_service import playwright_service
 from app.tools.adapters import (
     CONTENT_PUBLISH_TOOL,
+    GENERAL_NEWS_TOOL,
     HUGGINGFACE_DISCOVERY_TOOL,
     INSTAGRAM_STRATEGY_TOOL,
     LINKEDIN_STRATEGY_TOOL,
@@ -44,7 +46,6 @@ SYSTEM_ENTITIES = {
     "Grok": "provider",
     "Redis": "infrastructure",
     "Postgres": "database",
-    "HeyGen": "provider",
     "ElevenLabs": "provider",
     "Hugging Face": "provider",
     "Transformers": "framework",
@@ -53,11 +54,17 @@ SYSTEM_ENTITIES = {
     "Railway": "platform",
     "Private Shopper": "agent",
     "Social Manager": "agent",
+    "Nora": "agent",
+    "Ava": "agent",
+    "Wellness Coach": "agent",
     "LinkedIn": "platform",
     "Instagram": "platform",
     "DuckDuckGo": "provider",
     "Chrono24": "marketplace",
 }
+
+PROMPT_VERSION = "2026-04-08.1"
+POLICY_VERSION = "2026-04-08.1"
 
 
 async def _emit(run_id: str, node: str, status: str, detail: str) -> None:
@@ -114,6 +121,19 @@ def _looks_like_market_task(text: str) -> bool:
 def _detect_task_type(task: str) -> str:
     text = task.lower().strip()
 
+    news_triggers = [
+        "major news",
+        "news events",
+        "news today",
+        "headlines today",
+        "current events",
+        "latest news",
+        "what happened today",
+        "breaking news",
+    ]
+    if any(trigger in text for trigger in news_triggers):
+        return "news_brief"
+
     capability_triggers = [
         "capabilities",
         "capability",
@@ -161,10 +181,231 @@ def _detect_task_type(task: str) -> str:
     if any(trigger in text for trigger in social_triggers):
         return "social_media"
 
+    wellness_triggers = [
+        "wellness",
+        "wellness coach",
+        "habit",
+        "habits",
+        "motivation",
+        "motivated",
+        "workout",
+        "fitness",
+        "sleep goal",
+        "stress",
+        "accountability",
+        "healthy routine",
+        "meal plan",
+    ]
+    if any(trigger in text for trigger in wellness_triggers):
+        return "wellness_coaching"
+
+    secretary_triggers = [
+        "book appointment",
+        "schedule appointment",
+        "send email",
+        "send a text",
+        "send text",
+        "make a call",
+        "place a call",
+        "secretary",
+        "assistant call",
+        "follow up with",
+    ]
+    if any(trigger in text for trigger in secretary_triggers):
+        return "secretary"
+
     if _looks_like_market_task(text):
         return "market_research"
 
     return "conversation"
+
+
+def _detect_news_mode(task: str) -> str:
+    text = task.lower().strip()
+    baltimore_tokens = ["baltimore", "maryland", "local news", "local headlines", "local events"]
+    mixed_tokens = ["national and baltimore", "baltimore and national", "world and baltimore", "both baltimore and national", "major news and baltimore"]
+
+    has_baltimore = any(token in text for token in baltimore_tokens)
+    has_mixed = any(token in text for token in mixed_tokens)
+
+    if has_mixed:
+        return "mixed"
+    if has_baltimore:
+        return "baltimore_local"
+    return "national_major"
+
+
+def _is_time_sensitive_request(task: str) -> bool:
+    text = task.lower().strip()
+    return any(
+        trigger in text
+        for trigger in [
+            "today",
+            "tonight",
+            "this morning",
+            "this afternoon",
+            "right now",
+            "latest",
+            "breaking",
+            "current",
+            "recent",
+            "news",
+            "headline",
+            "weather",
+        ]
+    )
+
+
+def _tokenize_agent_aliases(*values: str) -> list[str]:
+    aliases: list[str] = []
+    for value in values:
+        text = (value or "").strip().lower()
+        if not text:
+            continue
+        aliases.append(text)
+        aliases.extend(part for part in re.split(r"[\s_/:-]+", text) if len(part) >= 3)
+    seen: list[str] = []
+    for alias in aliases:
+        if alias not in seen:
+            seen.append(alias)
+    return seen
+
+
+def _explicit_agent_target(task: str, profiles: dict[str, dict[str, Any]]) -> str | None:
+    text = task.lower().strip()
+    role_aliases = {
+        "shopper": ["shopper", "private shopper"],
+        "social": ["social", "social manager"],
+        "secretary": ["secretary", "assistant"],
+        "wellness": ["wellness", "wellness coach", "coach"],
+        "researcher": ["researcher"],
+        "critic": ["critic"],
+        "writer": ["writer"],
+        "coordinator": ["coordinator"],
+    }
+    for agent_id, profile in profiles.items():
+        aliases = _tokenize_agent_aliases(
+            agent_id,
+            str(profile.get("name") or ""),
+            *(role_aliases.get(agent_id, [])),
+        )
+        for alias in aliases:
+            if len(alias) < 3:
+                continue
+            if re.search(rf"\b{re.escape(alias)}\b", text):
+                return agent_id
+    return None
+
+
+def _detect_task_type_for_state(task: str, profiles: dict[str, dict[str, Any]], conservative: bool) -> str:
+    explicit = _explicit_agent_target(task, profiles)
+    if explicit == "shopper":
+        return "shopping"
+    if explicit == "social":
+        return "social_media"
+    if explicit == "secretary":
+        return "secretary"
+    if explicit == "wellness":
+        return "wellness_coaching"
+
+    if conservative:
+        text = task.lower().strip()
+        if _looks_like_market_task(text):
+            return "market_research"
+        strong_specialist_triggers = {
+            "shopping": [
+                "where can i buy",
+                "best deal",
+                "hard to find",
+                "in stock",
+                "source this item",
+            ],
+            "social_media": [
+                "social media plan",
+                "content calendar",
+                "posting schedule",
+                "linkedin post",
+                "instagram caption",
+                "tweet thread",
+            ],
+            "secretary": [
+                "book appointment",
+                "schedule appointment",
+                "make a call",
+                "place a call",
+                "send a text",
+                "send email",
+                "follow up with",
+            ],
+            "wellness_coaching": [
+                "wellness coach",
+                "habit plan",
+                "workout plan",
+                "sleep routine",
+                "motivation",
+                "accountability",
+                "stress plan",
+                "healthy routine",
+            ],
+        }
+        for task_type, triggers in strong_specialist_triggers.items():
+            if any(trigger in text for trigger in triggers):
+                return task_type
+        capability_triggers = [
+            "capabilities",
+            "capability",
+            "what can you do",
+            "what are you capable of",
+            "about you",
+            "who are you",
+            "what do you do",
+            "tell me about your system",
+            "tell me about yourself",
+            "introduce yourself",
+        ]
+        if any(trigger in text for trigger in capability_triggers):
+            return "capabilities"
+        if any(trigger in text for trigger in ["major news", "news today", "headlines today", "current events", "latest news", "breaking news"]):
+            return "news_brief"
+        return "conversation"
+
+    return _detect_task_type(task)
+
+
+def _is_fast_conversation_candidate(task: str) -> bool:
+    text = task.lower().strip()
+    if not text:
+        return False
+    if _is_time_sensitive_request(task):
+        return False
+    if len(text) > 220:
+        return False
+    if any(
+        trigger in text
+        for trigger in [
+            "shop for",
+            "find me",
+            "social media",
+            "tweet",
+            "linkedin",
+            "instagram",
+            "book appointment",
+            "send email",
+            "send text",
+            "make a call",
+            "market",
+            "earnings",
+            "ticker",
+            "browser",
+            "scrape",
+            "document",
+            "pdf",
+            "report",
+            "graph",
+        ]
+    ):
+        return False
+    return True
 
 
 def _format_risk_flags(flags: list[str]) -> str:
@@ -224,6 +465,48 @@ async def _emit_speech_preview(state: AgentState, agent_id: str, text: str) -> N
 def _tool_record(result: Any) -> dict[str, Any]:
     payload = result.payload if isinstance(result.payload, dict) else {}
     return {"tool": result.tool, "ok": result.ok, "payload": payload, "error": result.error}
+
+
+async def _run_agent_browser_script(state: AgentState, agent_id: str, detail: str) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    run_id = state["run_id"]
+    scripts = playwright_service.list_scripts_for_agent(agent_id)
+    if not scripts or not playwright_service.status().get("playwright_available"):
+        return [], [], []
+
+    script = next((item for item in scripts if item.get("mode") != "live"), scripts[0])
+    if script.get("mode") == "live" and script.get("approval_required", False):
+        await _emit(run_id, agent_id, "awaiting_approval", f"Live browser script awaiting approval: {script.get('name', 'script')}")
+        return (
+            [f"Live browser workflow queued for approval: {script.get('name', 'script')}"],
+            [f"tool://browser_script/{script['script_id']}"],
+            [{"tool": "browser_script", "ok": True, "payload": {"script_id": script["script_id"], "awaiting_approval": True}, "error": None}],
+        )
+    await _emit(run_id, agent_id, "start", detail)
+    try:
+        result = await playwright_service.run_script(str(script["script_id"]))
+    except Exception as exc:
+        await _emit(run_id, agent_id, "error", f"Browser script failed: {exc}")
+        return [], [f"tool://browser_script/{script['script_id']}"], [{"tool": "browser_script", "ok": False, "payload": {"script_id": script["script_id"]}, "error": str(exc)}]
+
+    notes: list[str] = []
+    for item in result.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("step") or item.get("action") or "browser_step")
+        if item.get("text"):
+            notes.append(f"{label}: {str(item.get('text'))[:220]}")
+        elif item.get("title"):
+            notes.append(f"{label}: {item.get('title')}")
+        elif item.get("url"):
+            notes.append(f"{label}: {item.get('url')}")
+    await _emit(run_id, agent_id, "ok", f"Browser script completed: {script.get('name', 'script')}")
+    tool_record = {
+        "tool": "browser_script",
+        "ok": True,
+        "payload": {"script_id": script["script_id"], "script_name": script.get("name"), "results": result.get("results", [])},
+        "error": None,
+    }
+    return notes, [f"tool://browser_script/{script['script_id']}"], [tool_record]
 
 
 async def _run_specialist_tools(state: AgentState, specialist_id: str, tools: list[Any], detail: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
@@ -322,11 +605,13 @@ def _local_conversation_fallback(task: str) -> str:
     if math_value is not None:
         return f"The answer is {math_value}."
 
-        return (
-            "I can answer questions normally, explain how this multi-agent system works, run research workflows, "
-            "and describe what the dashboard, graph, memory, and agent pipeline are doing in real time. "
-            "I also have specialist agents for shopping requests and social media planning."
-        )
+    return (
+        "I can answer questions normally, explain how this multi-agent system works, run research workflows, "
+        "and describe what the dashboard, graph, memory, and agent pipeline are doing in real time. "
+        "I also have specialist agents for shopping requests and social media planning."
+        " I also have a secretary agent for booking, follow-up, calls, texts, and email workflows."
+        " I also have a wellness coach for goals, habits, motivation, and accountability."
+    )
 
 
 async def _build_conversation_answer(state: AgentState) -> str:
@@ -384,6 +669,26 @@ async def _polish_spoken_response(state: AgentState, base_text: str, agent_id: s
     if not clean:
         return clean
 
+    def _strip_spoken_preamble(text: str) -> str:
+        value = " ".join(str(text or "").split()).strip()
+        patterns = [
+            r"^(here(?:'s| are)\s+)",
+            r"^(i can handle that as your secretary\.\s*)",
+            r"^(i can coach this with you\.\s*)",
+            r"^(i completed the shopping scan\.\s*)",
+            r"^(i built the social media plan\.\s*)",
+            r"^(i completed the market brief\.\s*)",
+            r"^(i can help with that\.\s*)",
+            r"^(key findings are:\s*)",
+            r"^(the main angles are:\s*)",
+            r"^(the strongest options are\s*)",
+        ]
+        for pattern in patterns:
+            value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+        return value.strip(" .") + ("." if value and value[-1] not in ".!?" else "")
+
+    clean = _strip_spoken_preamble(clean)
+
     profile = _agent_voice_settings(state, agent_id)
     persona = profile.get("speech_persona", "").strip()
     style = profile.get("speech_style", "natural")
@@ -394,15 +699,19 @@ async def _polish_spoken_response(state: AgentState, base_text: str, agent_id: s
     llm = build_llm_for_agent(agent_id, temperature=0.35)
     prompt = (
         "Rewrite this text for spoken delivery. Keep the meaning intact, keep it concise, and make it sound like a normal human. "
-        "No markdown. No bullet points. No repeated ideas.\n\n"
+        "No markdown. No bullet points. No repeated ideas. Start directly with the substance.\n\n"
         f"Persona: {persona or 'Polished human operator'}\n"
         f"Speech style: {style}\n\n"
+        "Rules:\n"
+        "- Do not start with filler or framing like 'Here are', 'I can help', 'I completed', 'I built', 'Absolutely', 'Sure', or 'As your'.\n"
+        "- Assume the short acknowledgment already happened.\n"
+        "- Go straight to the answer.\n\n"
         f"Text:\n{clean}"
     )
     try:
         response = await llm.ainvoke(prompt)
         polished = str(response.content).strip()
-        return polished or clean
+        return _strip_spoken_preamble(polished or clean)
     except Exception:
         return clean
 
@@ -515,6 +824,7 @@ async def _remember_episode(
 
 async def _with_node_retry(state: AgentState, node_name: str, fn: Callable[[], Awaitable[AgentState]]) -> AgentState:
     run_id = state["run_id"]
+    started_at = datetime.now(tz=timezone.utc)
     try:
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(3),
@@ -522,10 +832,35 @@ async def _with_node_retry(state: AgentState, node_name: str, fn: Callable[[], A
             reraise=True,
         ):
             with attempt:
-                return await fn()
+                result = await fn()
+                finished_at = datetime.now(tz=timezone.utc)
+                result.setdefault("node_results", [])
+                result["node_results"].append(
+                    {
+                        "node": node_name,
+                        "status": "ok",
+                        "detail": "completed",
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "elapsed_ms": int((finished_at - started_at).total_seconds() * 1000),
+                    }
+                )
+                return result
     except Exception as exc:
         state.setdefault("errors", [])
         state["errors"].append(f"{node_name}:{type(exc).__name__}:{exc}")
+        finished_at = datetime.now(tz=timezone.utc)
+        state.setdefault("node_results", [])
+        state["node_results"].append(
+            {
+                "node": node_name,
+                "status": "error",
+                "detail": str(exc),
+                "started_at": started_at.isoformat(),
+                "finished_at": finished_at.isoformat(),
+                "elapsed_ms": int((finished_at - started_at).total_seconds() * 1000),
+            }
+        )
         state["force_degraded"] = True
         if not state.get("final_report"):
             state["final_report"] = (
@@ -556,23 +891,50 @@ async def coordinator_node(state: AgentState) -> AgentState:
         state["thread_id"] = thread_id
         await _emit(run_id, "coordinator", "start", "Decomposing task")
 
-        neo4j_service.upsert_thread(thread_id, state["user_id"], session_id=state["session_id"])
+        conservative = bool(state.get("conservative_specialist_routing", False))
+        profiles = state.get("agent_profiles") or {}
+        explicit_target = _explicit_agent_target(state["task"], profiles)
+        task_type = _detect_task_type_for_state(state["task"], profiles, conservative)
+        if task_type == "news_brief":
+            state["news_mode"] = _detect_news_mode(state["task"])
+        fast_path = "conversation_direct" if task_type == "conversation" and _is_fast_conversation_candidate(state["task"]) else ""
+        route_agent = {
+            "shopping": "shopper",
+            "social_media": "social",
+            "secretary": "secretary",
+            "wellness_coaching": "wellness",
+        }.get(task_type, "coordinator")
+        if explicit_target:
+            route_reason = f"explicit mention of {explicit_target}"
+        elif task_type == "news_brief":
+            route_reason = f"time-sensitive news request ({state.get('news_mode') or _detect_news_mode(state['task'])})"
+        elif task_type == "conversation" and fast_path == "conversation_direct":
+            route_reason = "simple conversational request fast-pathed through coordinator and writer"
+        elif conservative:
+            route_reason = "conservative specialist routing kept the coordinator unless intent was strong"
+        else:
+            route_reason = "intent matched specialist workflow"
 
-        if not state.get("thread_initialized"):
-            await memory_service.ensure_user_and_thread(state["user_id"], thread_id)
-            await _remember_episode(
-                state,
-                "user",
-                "user_request",
-                state["task"],
-                role="user",
-                metadata={"task": state["task"], "mode": state["mode"]},
-            )
-            state["thread_initialized"] = True
+        if fast_path != "conversation_direct":
+            neo4j_service.upsert_thread(thread_id, state["user_id"], session_id=state["session_id"])
 
-        task_type = _detect_task_type(state["task"])
-        memory_refs = await memory_service.recall(state["user_id"], thread_id, state["task"])
-        thread_context = await memory_service.get_thread_context(thread_id)
+            if not state.get("thread_initialized"):
+                await memory_service.ensure_user_and_thread(state["user_id"], thread_id)
+                await _remember_episode(
+                    state,
+                    "user",
+                    "user_request",
+                    state["task"],
+                    role="user",
+                    metadata={"task": state["task"], "mode": state["mode"]},
+                )
+                state["thread_initialized"] = True
+
+            memory_refs = await memory_service.recall(state["user_id"], thread_id, state["task"])
+            thread_context = await memory_service.get_thread_context(thread_id)
+        else:
+            memory_refs = []
+            thread_context = ""
 
         if task_type == "capabilities":
             plan = (
@@ -585,6 +947,12 @@ async def coordinator_node(state: AgentState) -> AgentState:
                 "1) Interpret user intent\n"
                 "2) Pull relevant system and memory context\n"
                 "3) Answer in natural conversational style"
+            )
+        elif task_type == "news_brief":
+            plan = (
+                "1) Search for current major headlines\n"
+                "2) Pull the clearest top items and sources\n"
+                "3) Summarize them plainly without system chatter"
             )
         elif task_type == "shopping":
             plan = (
@@ -605,13 +973,14 @@ async def coordinator_node(state: AgentState) -> AgentState:
                 "3) Produce actionable content draft"
             )
 
-        await _remember_episode(
-            state,
-            "coordinator",
-            "coordinator_plan",
-            f"Task type: {task_type}\nPlan:\n{plan}",
-            metadata={"task_type": task_type},
-        )
+        if fast_path != "conversation_direct":
+            await _remember_episode(
+                state,
+                "coordinator",
+                "coordinator_plan",
+                f"Task type: {task_type}\nPlan:\n{plan}",
+                metadata={"task_type": task_type},
+            )
         await _emit(run_id, "coordinator", "ok", f"Plan generated ({task_type})")
 
         state["task_type"] = task_type
@@ -620,6 +989,18 @@ async def coordinator_node(state: AgentState) -> AgentState:
         state["thread_context"] = thread_context
         state["memory_context"] = thread_context
         state["agent_profiles"] = agent_profile_service.get_profiles()
+        state["fast_path"] = fast_path
+        state["policy_version"] = POLICY_VERSION
+        state["prompt_version"] = PROMPT_VERSION
+        state["route_decision"] = {
+            "task_type": task_type,
+            "agent_id": route_agent,
+            "explicit_agent": explicit_target or "",
+            "reason": route_reason,
+            "fast_path": fast_path or "",
+            "conservative_specialist_routing": conservative,
+            "news_mode": state.get("news_mode") or "",
+        }
         return state
 
     return await _with_node_retry(state, "coordinator", _inner)
@@ -655,6 +1036,36 @@ async def researcher_node(state: AgentState) -> AgentState:
             ]
             citations = ["system://conversation", "system://memory", "system://graph"]
             tool_results.append({"tool": "conversation_context", "ok": True, "payload": {"items": notes}, "error": None})
+            browser_notes, browser_citations, browser_records = await _run_agent_browser_script(
+                state,
+                "researcher",
+                "Running saved researcher browser script",
+            )
+            notes.extend(browser_notes)
+            citations.extend(browser_citations)
+            tool_results.extend(browser_records)
+        elif task_type == "news_brief":
+            news_mode = str(state.get("news_mode") or "national_major")
+            if news_mode == "mixed":
+                national_result = await GENERAL_NEWS_TOOL.run(state["task"], state["mode"], "national_major")
+                local_result = await GENERAL_NEWS_TOOL.run(state["task"], state["mode"], "baltimore_local")
+                for result in [national_result, local_result]:
+                    payload = result.payload if isinstance(result.payload, dict) else {}
+                    tool_results.append(_tool_record(result))
+                    label = "National" if payload.get("news_mode") == "national_major" else "Baltimore"
+                    notes.extend([f"{label}: {item}" for item in payload.get("items", [])])
+                    citations.extend([item.get("url", "") for item in payload.get("results", []) if isinstance(item, dict) and item.get("url")])
+            else:
+                result = await GENERAL_NEWS_TOOL.run(state["task"], state["mode"], news_mode)
+                payload = result.payload if isinstance(result.payload, dict) else {}
+                tool_results.append(_tool_record(result))
+                notes = list(payload.get("items", []))
+                citations = [item.get("url", "") for item in payload.get("results", []) if isinstance(item, dict) and item.get("url")]
+            state.setdefault("warnings", [])
+            if tool_results and any((record.get("payload") or {}).get("source_type") == "direct_outlet_scrape" for record in tool_results if isinstance(record, dict)):
+                state["warnings"].append(
+                    "Using direct outlet headline scraping. Sources are prioritized, but this is still lighter-weight than a dedicated newswire or news API."
+                )
         elif task_type == "shopping":
             general_task = _run_specialist_tools(
                 state,
@@ -676,6 +1087,14 @@ async def researcher_node(state: AgentState) -> AgentState:
                 "Flag resale risk, fulfillment uncertainty, and return-policy issues explicitly.",
             ]
             citations = shopper_citations + general_citations
+            browser_notes, browser_citations, browser_records = await _run_agent_browser_script(
+                state,
+                "shopper",
+                "Running shopper browser sourcing script",
+            )
+            notes.extend(browser_notes)
+            citations.extend(browser_citations)
+            tool_results.extend(browser_records)
         elif task_type == "social_media":
             researcher_task = _run_specialist_tools(
                 state,
@@ -700,6 +1119,36 @@ async def researcher_node(state: AgentState) -> AgentState:
             publish_result = await CONTENT_PUBLISH_TOOL.run(f"Drafting queue for: {state['task']}", state["mode"])
             tool_results.append(_tool_record(publish_result))
             citations.append(f"tool://{publish_result.tool}")
+            browser_notes, browser_citations, browser_records = await _run_agent_browser_script(
+                state,
+                "social",
+                "Running social browser admin script",
+            )
+            notes.extend(browser_notes)
+            citations.extend(browser_citations)
+            tool_results.extend(browser_records)
+        elif task_type == "secretary":
+            notes = [
+                "Secretary workflow should confirm channel, recipient, and timing before any live outreach.",
+                "Calls, texts, and email remain approval-gated until credentials and live mode are both enabled.",
+            ]
+            citations = ["system://secretary", "system://approval"]
+            browser_notes, browser_citations, browser_records = await _run_agent_browser_script(
+                state,
+                "secretary",
+                "Running secretary browser form workflow",
+            )
+            notes.extend(browser_notes)
+            citations.extend(browser_citations)
+            tool_results.extend(browser_records)
+        elif task_type == "wellness_coaching":
+            notes = [
+                "Wellness coaching should turn broad intention into a small number of specific, repeatable behaviors.",
+                "The best plans balance movement, sleep, food, stress load, and recovery rather than overfocusing on one lever.",
+                "Accountability works better with short feedback loops, explicit targets, and compassionate course correction.",
+                "Motivation should be anchored to a concrete routine and next action, not only mood.",
+            ]
+            citations = ["system://wellness", "system://habits", "system://accountability"]
         else:
             market_tools = [MARKET_NEWS_TOOL, HUGGINGFACE_DISCOVERY_TOOL]
             for tool in market_tools:
@@ -718,7 +1167,7 @@ async def researcher_node(state: AgentState) -> AgentState:
             metadata={"citations": citations[:8], "task_type": task_type},
         )
 
-        tool_count = 3 if task_type == "shopping" else (6 if task_type == "social_media" else (2 if task_type == "market_research" else max(len(TOOLS), 1)))
+        tool_count = 3 if task_type == "shopping" else (6 if task_type == "social_media" else (1 if task_type == "news_brief" else (2 if task_type == "market_research" else max(len(TOOLS), 1))))
         for tool_result in tool_results[-tool_count:]:
             neo4j_service.record_tool_execution(
                 run_id,
@@ -761,6 +1210,9 @@ async def critic_node(state: AgentState) -> AgentState:
         elif task_type == "social_media":
             if len(notes) < 3:
                 critique_flags.append("thin_campaign_plan")
+        elif task_type == "news_brief":
+            if len(notes) < 2:
+                critique_flags.append("thin_news_brief")
 
         verdict = "PASS"
         reason = "Sufficient for output"
@@ -811,6 +1263,7 @@ async def writer_node(state: AgentState) -> AgentState:
 
         task_type = state.get("task_type", "conversation")
         speaker_agent = "writer"
+        action_items: list[dict[str, Any]] = []
 
         if task_type == "capabilities":
             report = (
@@ -829,14 +1282,55 @@ async def writer_node(state: AgentState) -> AgentState:
                 + "\n".join(f"- {c}" for c in state.get("citations", []))
             )
             spoken_response = await _polish_spoken_response(state, _capability_spoken_response(state["mode"]), speaker_agent)
+            action_items = [{"owner": "coordinator", "type": "clarify_goal", "label": "Choose the next system capability to use"}]
         elif task_type == "conversation":
-            spoken_response = await _polish_spoken_response(state, await _build_conversation_answer(state), speaker_agent)
+            if state.get("fast_path") == "conversation_direct":
+                spoken_response = _local_conversation_fallback(state.get("task", ""))
+                if not spoken_response:
+                    spoken_response = "I can help with that. Tell me a bit more about what you want to do."
+            else:
+                spoken_response = await _polish_spoken_response(state, await _build_conversation_answer(state), speaker_agent)
             report = (
                 "# Conversation Response\n\n"
                 f"{spoken_response}\n\n"
                 "## Context Used\n"
                 + "\n".join(f"- {n}" for n in state.get("research_notes", []))
             )
+            action_items = [{"owner": "coordinator", "type": "follow_up", "label": "Continue the conversation or escalate to a specialist"}]
+        elif task_type == "news_brief":
+            top_notes = state.get("research_notes", [])[:5]
+            top_links = state.get("citations", [])[:5]
+            news_mode = str(state.get("news_mode") or "national_major")
+            spoken_response = "; ".join(top_notes[:3]) if top_notes else "I could not confirm enough reliable headlines."
+            if news_mode == "mixed":
+                national = [item.replace("National: ", "") for item in state.get("research_notes", []) if str(item).startswith("National: ")]
+                local = [item.replace("Baltimore: ", "") for item in state.get("research_notes", []) if str(item).startswith("Baltimore: ")]
+                report = (
+                    "# News Brief\n\n"
+                    "## National / World Headlines\n"
+                    + "\n".join(f"- {n}" for n in national[:5])
+                    + "\n\n## Baltimore Local Headlines\n"
+                    + "\n".join(f"- {n}" for n in local[:5])
+                    + "\n\n## Sources\n"
+                    + "\n".join(f"- {c}" for c in top_links)
+                )
+            elif news_mode == "baltimore_local":
+                report = (
+                    "# Baltimore News Brief\n\n"
+                    "## Baltimore Local Headlines\n"
+                    + "\n".join(f"- {n}" for n in top_notes)
+                    + "\n\n## Sources\n"
+                    + "\n".join(f"- {c}" for c in top_links)
+                )
+            else:
+                report = (
+                    "# News Brief\n\n"
+                    "## National / World Headlines\n"
+                    + "\n".join(f"- {n}" for n in top_notes)
+                    + "\n\n## Sources\n"
+                    + "\n".join(f"- {c}" for c in top_links)
+                )
+            action_items = [{"owner": "coordinator", "type": "news_follow_up", "label": "Ask for deeper coverage on one headline or switch to Baltimore-only news"}]
         elif task_type == "shopping":
             speaker_agent = "shopper"
             top_notes = state.get("research_notes", [])[:4]
@@ -863,12 +1357,15 @@ async def writer_node(state: AgentState) -> AgentState:
             spoken_response = await _polish_spoken_response(
                 state,
                 (
-                    "I completed the shopping scan. "
-                    f"The strongest options are {('; '.join(top_notes[:3]) if top_notes else 'still being narrowed down')}. "
+                    f"{('; '.join(top_notes[:3]) if top_notes else 'The options are still being narrowed down')}. "
                     "I would prioritize trusted sellers and clear return windows before chasing the cheapest listing."
                 ),
                 speaker_agent,
             )
+            action_items = [
+                {"owner": "shopper", "type": "approve_lead", "label": "Approve the best lead for follow-up"},
+                {"owner": "shopper", "type": "compare_risk", "label": "Compare seller trust and return policy before buying"},
+            ]
         elif task_type == "social_media":
             speaker_agent = "social"
             top_notes = state.get("research_notes", [])[:4]
@@ -892,12 +1389,65 @@ async def writer_node(state: AgentState) -> AgentState:
             spoken_response = await _polish_spoken_response(
                 state,
                 (
-                    "I built the social media plan. "
-                    f"The main angles are {('; '.join(top_notes[:3]) if top_notes else 'still being refined')}. "
+                    f"{('; '.join(top_notes[:3]) if top_notes else 'The main angles are still being refined')}. "
                     "I would keep the message consistent, then tailor hooks and cadence by platform."
                 ),
                 speaker_agent,
             )
+            action_items = [
+                {"owner": "social", "type": "queue_post", "label": "Queue one platform-specific post for approval"},
+                {"owner": "social", "type": "schedule_campaign", "label": "Set publishing cadence for the week"},
+            ]
+        elif task_type == "secretary":
+            speaker_agent = "secretary"
+            report = (
+                "# Secretary Brief\n\n"
+                f"Request: {state['task']}\n\n"
+                f"## Plan\n{state.get('coordinator_plan', 'N/A')}\n\n"
+                "## Next Actions\n"
+                "- Confirm the contact, channel, and timing.\n"
+                "- Queue an approval-gated call, text, or email.\n"
+                "- Log the outreach result back into memory and the graph.\n"
+            )
+            spoken_response = await _polish_spoken_response(
+                state,
+                "I will line up the call, text, or email flow and keep it approval-gated before anything goes out.",
+                speaker_agent,
+            )
+            action_items = [
+                {"owner": "secretary", "type": "confirm_contact", "label": "Confirm recipient and preferred channel"},
+                {"owner": "secretary", "type": "queue_outreach", "label": "Queue approval-gated outreach"},
+            ]
+        elif task_type == "wellness_coaching":
+            speaker_agent = "wellness"
+            top_notes = state.get("research_notes", [])[:4]
+            report = (
+                "# Wellness Coach Brief\n\n"
+                f"Request: {state['task']}\n\n"
+                "## Focus Areas\n"
+                + "\n".join(f"- {n}" for n in top_notes)
+                + "\n\n## This Week's Structure\n"
+                "- Pick one daily anchor habit you can complete in under ten minutes.\n"
+                "- Set one movement target, one recovery target, and one stress-reduction target.\n"
+                "- Review adherence once at the end of the day instead of negotiating all day.\n"
+                "\n## Accountability Prompts\n"
+                "- What is today's smallest non-negotiable win?\n"
+                "- What is the one friction point I can remove before noon?\n"
+                "- If the day goes sideways, what is the reduced version that still counts?\n"
+            )
+            spoken_response = await _polish_spoken_response(
+                state,
+                (
+                    "We will keep it practical: one anchor habit, one movement target, one recovery target, "
+                    "and a short daily accountability check so the plan is realistic enough to stick."
+                ),
+                speaker_agent,
+            )
+            action_items = [
+                {"owner": "wellness", "type": "anchor_habit", "label": "Choose one daily anchor habit"},
+                {"owner": "wellness", "type": "movement_goal", "label": "Set one movement target for the week"},
+                {"owner": "wellness", "type": "recovery_goal", "label": "Set one sleep or recovery target"},
+            ]
         else:
             report = (
                 f"# Market Research Brief\n\n"
@@ -915,69 +1465,79 @@ async def writer_node(state: AgentState) -> AgentState:
             spoken_response = await _polish_spoken_response(
                 state,
                 (
-                    f"I completed the market brief. Key findings are: {spoken_findings}. "
+                    f"{spoken_findings}. "
                     f"Risk review is {_format_risk_flags(state.get('critique_flags', []))}."
                 ),
                 speaker_agent,
             )
+            action_items = [
+                {"owner": "coordinator", "type": "review_brief", "label": "Review the market brief and choose next action"},
+            ]
 
         await _emit_speech_preview(state, speaker_agent, spoken_response)
-        writer_episode_id = await _remember_episode(
-            state,
-            "writer",
-            "final_output",
-            report,
-            metadata={"task_type": task_type, "citations": state.get("citations", [])[:8], "speaker_agent": speaker_agent},
-        )
+        writer_episode_id = ""
+        if state.get("fast_path") != "conversation_direct":
+            writer_episode_id = await _remember_episode(
+                state,
+                "writer",
+                "final_output",
+                report,
+                metadata={"task_type": task_type, "citations": state.get("citations", [])[:8], "speaker_agent": speaker_agent},
+            )
 
         claim_records = []
-        for note in state.get("research_notes", [])[:5]:
-            entities = [item["name"] for item in _extract_entities([note])]
-            claim_id = neo4j_service.create_claim(
-                run_id,
-                thread_id,
-                note,
-                source=(state.get("citations", ["system://generated"])[0] if state.get("citations") else "system://generated"),
-                episode_id=writer_episode_id or None,
-                entity_names=entities,
-            )
-            claim_records.append(
-                {
-                    "claim_id": claim_id,
-                    "text": note,
-                    "source": state.get("citations", ["system://generated"])[0] if state.get("citations") else "system://generated",
-                    "confidence": 0.72,
-                    "status": "active",
-                    "entity_names": entities,
-                    "created_at": datetime.now(tz=timezone.utc).isoformat(),
-                }
-            )
+        if state.get("fast_path") != "conversation_direct":
+            for note in state.get("research_notes", [])[:5]:
+                entities = [item["name"] for item in _extract_entities([note])]
+                claim_id = neo4j_service.create_claim(
+                    run_id,
+                    thread_id,
+                    note,
+                    source=(state.get("citations", ["system://generated"])[0] if state.get("citations") else "system://generated"),
+                    episode_id=writer_episode_id or None,
+                    entity_names=entities,
+                )
+                claim_records.append(
+                    {
+                        "claim_id": claim_id,
+                        "text": note,
+                        "source": state.get("citations", ["system://generated"])[0] if state.get("citations") else "system://generated",
+                        "confidence": 0.72,
+                        "status": "active",
+                        "entity_names": entities,
+                        "created_at": datetime.now(tz=timezone.utc).isoformat(),
+                    }
+                )
         state["claims"] = claim_records
 
-        publish_result = await CONTENT_PUBLISH_TOOL.run(report, state["mode"])
-        state.setdefault("tool_results", []).append(
-            {
-                "tool": publish_result.tool,
-                "ok": publish_result.ok,
-                "payload": publish_result.payload,
-                "error": publish_result.error,
-            }
-        )
-        neo4j_service.record_tool_execution(
-            run_id,
-            thread_id,
-            "writer",
-            publish_result.tool,
-            detail="Content publish step",
-            ok=publish_result.ok,
-            payload=publish_result.payload if isinstance(publish_result.payload, dict) else {},
-            error=publish_result.error,
-            episode_id=writer_episode_id or None,
-        )
+        if state.get("fast_path") != "conversation_direct":
+            publish_result = await CONTENT_PUBLISH_TOOL.run(report, state["mode"])
+            state.setdefault("tool_results", []).append(
+                {
+                    "tool": publish_result.tool,
+                    "ok": publish_result.ok,
+                    "payload": publish_result.payload,
+                    "error": publish_result.error,
+                }
+            )
+            neo4j_service.record_tool_execution(
+                run_id,
+                thread_id,
+                "writer",
+                publish_result.tool,
+                detail="Content publish step",
+                ok=publish_result.ok,
+                payload=publish_result.payload if isinstance(publish_result.payload, dict) else {},
+                error=publish_result.error,
+                episode_id=writer_episode_id or None,
+            )
 
         await _emit(run_id, "writer", "ok", "Final report completed")
         state["spoken_response"] = spoken_response
+        state["speaker_agent"] = speaker_agent
         state["final_report"] = report
+        state["action_items"] = action_items
+        state["operator_summary"] = spoken_response
         state["run_status"] = "completed"
         return state
 
@@ -1007,6 +1567,7 @@ async def degraded_handler_node(state: AgentState) -> AgentState:
         episode_id=state.get("last_episode_id") or None,
     )
     state["spoken_response"] = "I hit repeated failures and switched to degraded mode. I can still provide a fallback summary."
+    state["speaker_agent"] = "coordinator"
     state["final_report"] = fallback
     state["run_status"] = "degraded"
     return state
@@ -1016,6 +1577,14 @@ def should_research_continue(state: AgentState) -> str:
     if state.get("force_degraded"):
         return "degraded"
     return "critic" if len(state.get("research_notes", [])) >= 2 else "degraded"
+
+
+def should_coordinator_route(state: AgentState) -> str:
+    if state.get("force_degraded"):
+        return "degraded"
+    if state.get("fast_path") == "conversation_direct":
+        return "writer"
+    return "researcher"
 
 
 def should_critic_route(state: AgentState) -> str:

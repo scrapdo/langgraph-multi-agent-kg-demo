@@ -10,7 +10,7 @@ class AgentState(TypedDict, total=False):
     thread_id: str
     mode: Literal["simulation", "live"]
     task: str
-    task_type: Literal["market_research", "capabilities", "conversation", "shopping", "social_media"]
+    task_type: Literal["market_research", "capabilities", "conversation", "shopping", "social_media", "secretary", "news_brief", "wellness_coaching"]
     agent_profiles: dict[str, dict[str, str]]
 
     coordinator_plan: str
@@ -31,6 +31,14 @@ class AgentState(TypedDict, total=False):
     tool_results: list[dict[str, Any]]
     node_results: list[dict[str, Any]]
     errors: list[str]
+    warnings: list[str]
+    news_mode: str
+    route_decision: dict[str, Any]
+    action_items: list[dict[str, Any]]
+    operator_summary: str
+    prompt_version: str
+    policy_version: str
+    run_metrics: dict[str, Any]
 
     thread_initialized: bool
     last_episode_id: str
@@ -38,3 +46,5 @@ class AgentState(TypedDict, total=False):
     max_revisions: int
     run_status: Literal["queued", "running", "completed", "failed", "degraded"]
     force_degraded: bool
+    fast_path: str
+    conservative_specialist_routing: bool

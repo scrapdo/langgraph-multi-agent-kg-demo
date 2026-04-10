@@ -10,6 +10,7 @@ import {
   getDesktopActions,
   getDesktopBridgeDiagnostics,
   getDesktopBridgeStatus,
+  getDesktopSchedulePresets,
   getDesktopSchedules,
   getDesktopStatus,
   openDesktopAction,
@@ -19,14 +20,79 @@ import {
   testDesktopBridge,
   upsertDesktopSchedule,
 } from '../api/client';
-import type { DesktopAction, DesktopSchedule, RunDetail } from '../types';
+import type { DesktopAction, DesktopSchedule, DesktopSchedulePreset, RunDetail } from '../types';
+
+const DEFAULT_DESTINATION_PRESETS: DesktopSchedulePreset[] = [
+  { id: 'custom', label: 'Custom', subdir: '' },
+  { id: 'briefs', label: 'Briefs', subdir: 'briefs' },
+  { id: 'writer_exports', label: 'Writer Exports', subdir: 'writer/exports' },
+  { id: 'social_campaigns', label: 'Social Campaigns', subdir: 'social/campaigns' },
+  { id: 'inbox_briefs', label: 'Inbox Briefs', subdir: 'gmail/inbox-briefs' },
+  { id: 'calendar_ops', label: 'Calendar Ops', subdir: 'gmail/calendar-ops' },
+  { id: 'approvals', label: 'Approvals Queue', subdir: 'ops/approvals' },
+  { id: 'wellness_checkins', label: 'Wellness Check-ins', subdir: 'wellness/checkins' },
+];
+
+const DEFAULT_TEMPLATE_PRESETS: DesktopSchedulePreset[] = [
+  { id: 'none', label: 'No Preset', prompt_template: '', content_template: '' },
+  { id: 'morning_operator', label: 'Morning Operator Brief', prompt_template: 'Prepare a morning operator brief with inbox priorities, calendar risks, and the next three actions to take.' },
+  { id: 'founder_writer', label: 'Founder Writer Export', content_template: '# Founder Export\n\nProduce a concise operator-ready brief with headline, context, risks, and recommended next actions.' },
+  { id: 'social_launch', label: 'Social Launch Pack', content_template: 'Build a launch-ready social package with one primary post, two variations, CTA options, and asset handoff notes.' },
+  { id: 'reply_drafter', label: 'Reply Draft Suggestions', prompt_template: 'Review the highest-priority inbox threads and draft concise suggested replies with rationale and next steps.' },
+  { id: 'wellness_nudge', label: 'Wellness Check-in', prompt_template: 'Prepare a concise wellness check-in with one goal, one habit reminder, one accountability question, and one encouraging note.', content_template: '# Wellness Check-in\n\nShare one concrete wellness goal, one habit reminder, one accountability question, and one motivating prompt for today.' },
+];
+
+const WORKFLOW_VALIDATION: Record<string, { recommendedDestinations: string[]; recommendedTemplates: string[]; notes: string[] }> = {
+  morning_brief: {
+    recommendedDestinations: ['inbox_briefs', 'calendar_ops', 'briefs'],
+    recommendedTemplates: ['morning_operator'],
+    notes: ['Morning briefs work best with Gmail/Calendar destinations and an operator-style prompt template.'],
+  },
+  agenda_brief: {
+    recommendedDestinations: ['calendar_ops', 'briefs'],
+    recommendedTemplates: ['morning_operator'],
+    notes: ['Agenda workflows should normally write into calendar-oriented output folders.'],
+  },
+  inbox_triage: {
+    recommendedDestinations: ['inbox_briefs', 'briefs'],
+    recommendedTemplates: ['reply_drafter', 'morning_operator'],
+    notes: ['Inbox triage should prefer inbox-oriented destinations and a prompt template, not a content template.'],
+  },
+  draft_reply_suggestions: {
+    recommendedDestinations: ['inbox_briefs', 'briefs'],
+    recommendedTemplates: ['reply_drafter'],
+    notes: ['Reply-drafting schedules need a prompt template; content templates are ignored.'],
+  },
+  writer_export: {
+    recommendedDestinations: ['writer_exports', 'briefs'],
+    recommendedTemplates: ['founder_writer'],
+    notes: ['Writer exports should generally use a writer destination and a content template.'],
+  },
+  social_package: {
+    recommendedDestinations: ['social_campaigns', 'briefs'],
+    recommendedTemplates: ['social_launch'],
+    notes: ['Social package schedules should use a social destination and a content template.'],
+  },
+  wellness_checkin: {
+    recommendedDestinations: ['wellness_checkins', 'briefs'],
+    recommendedTemplates: ['wellness_nudge'],
+    notes: ['Wellness check-ins should normally write to a wellness folder and use a check-in prompt or content template.'],
+  },
+  wellness_outreach: {
+    recommendedDestinations: ['wellness_checkins', 'briefs'],
+    recommendedTemplates: ['wellness_nudge'],
+    notes: ['Wellness outreach sends the check-in through Nora to opted-in contacts when live mode and channels are configured.'],
+  },
+};
 
 interface Props {
   runId: string | null;
   run: RunDetail | null;
+  editingSchedule?: DesktopSchedule | null;
+  onLoadedSchedule?: () => void;
 }
 
-export function DesktopOpsPanel({ runId, run }: Props) {
+export function DesktopOpsPanel({ runId, run, editingSchedule, onLoadedSchedule }: Props) {
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [actions, setActions] = useState<DesktopAction[]>([]);
   const [busy, setBusy] = useState('');
@@ -34,9 +100,19 @@ export function DesktopOpsPanel({ runId, run }: Props) {
   const [bridgeStatus, setBridgeStatus] = useState<Record<string, unknown> | null>(null);
   const [bridgeDiagnostics, setBridgeDiagnostics] = useState<Record<string, unknown> | null>(null);
   const [schedules, setSchedules] = useState<DesktopSchedule[]>([]);
+  const [destinationPresets, setDestinationPresets] = useState<DesktopSchedulePreset[]>(DEFAULT_DESTINATION_PRESETS);
+  const [templatePresets, setTemplatePresets] = useState<DesktopSchedulePreset[]>(DEFAULT_TEMPLATE_PRESETS);
+  const [editingScheduleId, setEditingScheduleId] = useState('');
   const [scheduleName, setScheduleName] = useState('Weekday Morning Brief');
   const [scheduleWorkflow, setScheduleWorkflow] = useState('morning_brief');
   const [scheduleAgent, setScheduleAgent] = useState('coordinator');
+  const [scheduleMode, setScheduleMode] = useState<'simulation' | 'live'>('simulation');
+  const [scheduleApprovalRequired, setScheduleApprovalRequired] = useState(false);
+  const [scheduleOutputPreset, setScheduleOutputPreset] = useState('custom');
+  const [scheduleOutputSubdir, setScheduleOutputSubdir] = useState('');
+  const [scheduleTemplatePreset, setScheduleTemplatePreset] = useState('none');
+  const [schedulePromptTemplate, setSchedulePromptTemplate] = useState('');
+  const [scheduleContentTemplate, setScheduleContentTemplate] = useState('');
   const [scheduleCadence, setScheduleCadence] = useState('Weekdays 8:00 AM');
   const [scheduleRrule, setScheduleRrule] = useState('FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=8;BYMINUTE=0');
   const [gmailPrompt, setGmailPrompt] = useState('Review my latest inbox and calendar conflicts, then propose next actions.');
@@ -46,6 +122,21 @@ export function DesktopOpsPanel({ runId, run }: Props) {
   const googleWorkspace = (status?.google_workspace as Record<string, unknown> | undefined) ?? null;
   const hostBridgeConfigured = Boolean(status?.host_bridge_configured);
   const finderRevealAvailable = Boolean(status?.finder_reveal_available);
+  const validation = WORKFLOW_VALIDATION[scheduleWorkflow];
+  const scheduleWarnings: string[] = [];
+  if (validation) {
+    if (scheduleOutputPreset !== 'custom' && !validation.recommendedDestinations.includes(scheduleOutputPreset)) {
+      scheduleWarnings.push(`Destination preset "${scheduleOutputPreset}" is unusual for ${scheduleWorkflow}.`);
+    }
+    if (scheduleTemplatePreset !== 'none' && !validation.recommendedTemplates.includes(scheduleTemplatePreset)) {
+      scheduleWarnings.push(`Template preset "${scheduleTemplatePreset}" is unusual for ${scheduleWorkflow}.`);
+    }
+    if (scheduleWorkflow === 'writer_export' || scheduleWorkflow === 'social_package' || scheduleWorkflow === 'wellness_checkin') {
+      if (!scheduleContentTemplate.trim()) scheduleWarnings.push('This workflow relies on a content template for the best result.');
+    } else if (!schedulePromptTemplate.trim()) {
+      scheduleWarnings.push('This workflow relies on a prompt template for the best result.');
+    }
+  }
 
   const refresh = async () => {
     const [statusPayload, actionsPayload, bridgePayload] = await Promise.all([
@@ -58,11 +149,33 @@ export function DesktopOpsPanel({ runId, run }: Props) {
     setBridgeStatus(bridgePayload);
     getDesktopBridgeDiagnostics().then(setBridgeDiagnostics).catch(() => undefined);
     getDesktopSchedules().then((payload) => setSchedules(payload.schedules)).catch(() => undefined);
+    getDesktopSchedulePresets().then((payload) => {
+      setDestinationPresets(payload.destination_presets);
+      setTemplatePresets(payload.template_presets);
+    }).catch(() => undefined);
   };
 
   useEffect(() => {
     void refresh().catch((err) => setError(err instanceof Error ? err.message : 'Failed to load desktop ops'));
   }, [runId]);
+
+  useEffect(() => {
+    if (!editingSchedule) return;
+    setEditingScheduleId(editingSchedule.schedule_id);
+    setScheduleName(editingSchedule.name);
+    setScheduleWorkflow(editingSchedule.workflow_kind);
+    setScheduleAgent(editingSchedule.agent_id);
+    setScheduleMode(editingSchedule.mode);
+    setScheduleApprovalRequired(Boolean(editingSchedule.approval_required));
+    setScheduleOutputPreset(editingSchedule.output_preset || 'custom');
+    setScheduleOutputSubdir(editingSchedule.output_subdir || '');
+    setScheduleTemplatePreset(editingSchedule.template_preset || 'none');
+    setSchedulePromptTemplate(editingSchedule.prompt_template || '');
+    setScheduleContentTemplate(editingSchedule.content_template || '');
+    setScheduleCadence(editingSchedule.cadence_label);
+    setScheduleRrule(editingSchedule.rrule);
+    onLoadedSchedule?.();
+  }, [editingSchedule, onLoadedSchedule]);
 
   const queueWriterDoc = async () => {
     if (!runId) return;
@@ -214,9 +327,17 @@ export function DesktopOpsPanel({ runId, run }: Props) {
     setError('');
     try {
       const payload = await upsertDesktopSchedule({
+        schedule_id: editingScheduleId || undefined,
         name: scheduleName,
         workflow_kind: scheduleWorkflow,
         agent_id: scheduleAgent,
+        mode: scheduleMode,
+        approval_required: scheduleApprovalRequired,
+        output_preset: scheduleOutputPreset,
+        output_subdir: scheduleOutputSubdir,
+        template_preset: scheduleTemplatePreset,
+        prompt_template: schedulePromptTemplate,
+        content_template: scheduleContentTemplate,
         cadence_label: scheduleCadence,
         rrule: scheduleRrule,
         enabled: true,
@@ -323,7 +444,7 @@ export function DesktopOpsPanel({ runId, run }: Props) {
 
       <div className="specialist-callout">
         <strong>Scheduled Desktop Workflows</strong>
-        <p className="muted">Persist workflow cadence policies here first. This does not run jobs by itself; it gives the app a stable schedule contract to wire into an automation runner next.</p>
+        <p className="muted">Persist cadence policies for proactive desktop and coach workflows, including inbox briefs, exports, social packages, and wellness check-ins.</p>
         <div className="desktop-history-filters">
           <label>
             Name
@@ -336,6 +457,10 @@ export function DesktopOpsPanel({ runId, run }: Props) {
               <option value="agenda_brief">Agenda Brief</option>
               <option value="inbox_triage">Inbox Triage</option>
               <option value="draft_reply_suggestions">Draft Reply Suggestions</option>
+              <option value="writer_export">Writer Export</option>
+              <option value="social_package">Social Package</option>
+              <option value="wellness_checkin">Wellness Check-in</option>
+              <option value="wellness_outreach">Wellness Outreach</option>
             </select>
           </label>
           <label>
@@ -344,6 +469,14 @@ export function DesktopOpsPanel({ runId, run }: Props) {
               <option value="coordinator">coordinator</option>
               <option value="researcher">researcher</option>
               <option value="writer">writer</option>
+              <option value="wellness">wellness</option>
+            </select>
+          </label>
+          <label>
+            Mode
+            <select value={scheduleMode} onChange={(e) => setScheduleMode(e.target.value as 'simulation' | 'live')}>
+              <option value="simulation">simulation</option>
+              <option value="live">live</option>
             </select>
           </label>
           <label>
@@ -354,20 +487,98 @@ export function DesktopOpsPanel({ runId, run }: Props) {
             RRULE
             <input value={scheduleRrule} onChange={(e) => setScheduleRrule(e.target.value)} />
           </label>
+          <label>
+            Destination Preset
+            <select
+              value={scheduleOutputPreset}
+              onChange={(e) => {
+                const next = e.target.value;
+                setScheduleOutputPreset(next);
+                const preset = destinationPresets.find((item) => item.id === next);
+                if (preset && next !== 'custom') setScheduleOutputSubdir(preset.subdir ?? '');
+              }}
+            >
+              {destinationPresets.map((preset) => (
+                <option key={preset.id} value={preset.id}>{preset.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Output Subdir
+            <input value={scheduleOutputSubdir} onChange={(e) => setScheduleOutputSubdir(e.target.value)} placeholder="optional/custom-folder" />
+          </label>
+          <label>
+            Template Preset
+            <select
+              value={scheduleTemplatePreset}
+              onChange={(e) => {
+                const next = e.target.value;
+                setScheduleTemplatePreset(next);
+                const preset = templatePresets.find((item) => item.id === next);
+                if (preset) {
+                  setSchedulePromptTemplate(preset.prompt_template ?? '');
+                  setScheduleContentTemplate(preset.content_template ?? '');
+                }
+              }}
+            >
+              {templatePresets.map((preset) => (
+                <option key={preset.id} value={preset.id}>{preset.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Prompt Template
+            <input value={schedulePromptTemplate} onChange={(e) => setSchedulePromptTemplate(e.target.value)} placeholder="used for Gmail/calendar schedules" />
+          </label>
+          <label>
+            Content Template
+            <input value={scheduleContentTemplate} onChange={(e) => setScheduleContentTemplate(e.target.value)} placeholder="used for writer/social schedules" />
+          </label>
         </div>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={scheduleApprovalRequired} onChange={(e) => setScheduleApprovalRequired(e.target.checked)} />
+          Require approval before live execution
+        </label>
         <div className="action-row">
           <button type="button" onClick={() => void saveSchedule()} disabled={busy === 'schedule-save'}>
-            {busy === 'schedule-save' ? 'Saving...' : 'Save Schedule Policy'}
+            {busy === 'schedule-save' ? 'Saving...' : editingScheduleId ? 'Update Schedule Policy' : 'Save Schedule Policy'}
           </button>
           <button type="button" className="ghost-button" onClick={() => void dispatchSchedulesNow()} disabled={busy === 'schedule-dispatch'}>
             {busy === 'schedule-dispatch' ? 'Dispatching...' : 'Dispatch Due Schedules'}
           </button>
         </div>
+        {validation && (
+          <div className="specialist-callout">
+            <strong>Workflow Fit</strong>
+            {validation.notes.map((note) => (
+              <p key={note} className="muted small">{note}</p>
+            ))}
+            {scheduleWarnings.length > 0 ? (
+              <ul className="compact-bullets">
+                {scheduleWarnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted small">Current destination and template selections fit this workflow.</p>
+            )}
+          </div>
+        )}
         <ul className="compact-bullets">
           {schedules.length === 0 && <li>No desktop workflow policies saved yet.</li>}
           {schedules.map((schedule) => (
             <li key={schedule.schedule_id}>
-              {schedule.name} · {schedule.workflow_kind} · {schedule.cadence_label} · {schedule.enabled ? 'enabled' : 'disabled'}
+              {schedule.name} · {schedule.workflow_kind} · {schedule.mode} · {schedule.cadence_label} · {schedule.enabled ? 'enabled' : 'disabled'}
+              {schedule.last_run_status ? ` · last ${schedule.last_run_status}` : ''}
+              {schedule.last_run_at ? ` · ${new Date(schedule.last_run_at).toLocaleString()}` : ''}
+              {(schedule.success_count || schedule.failure_count) ? ` · ok ${schedule.success_count ?? 0} / fail ${schedule.failure_count ?? 0}` : ''}
+              {schedule.approval_required ? ' · approval gate' : ''}
+              {schedule.output_preset ? ` · preset ${schedule.output_preset}` : ''}
+              {schedule.output_subdir ? ` · folder ${schedule.output_subdir}` : ''}
+              {schedule.template_preset ? ` · template ${schedule.template_preset}` : ''}
+              {schedule.prompt_template ? ' · prompt template' : ''}
+              {schedule.content_template ? ' · content template' : ''}
+              {schedule.last_error ? ` · error: ${schedule.last_error}` : ''}
             </li>
           ))}
         </ul>

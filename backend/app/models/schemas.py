@@ -14,6 +14,7 @@ class RunRequest(BaseModel):
     session_id: str = Field(default="demo-session")
     task: str
     mode: RunMode = "simulation"
+    conservative_specialist_routing: bool = False
 
 
 class ToolAttempt(BaseModel):
@@ -96,8 +97,7 @@ class AgentProfile(BaseModel):
     speech_style: str = "natural"
     speech_persona: str = ""
     premium_voice_id: str = ""
-    heygen_avatar_id: str = ""
-    heygen_voice_id: str = ""
+    ready: bool = False
     app_execution_mode: Literal["disabled", "approval", "auto"] = "approval"
     specialist_apps: list[str] = Field(default_factory=list)
 
@@ -116,8 +116,7 @@ class AgentProfilePatch(BaseModel):
     speech_style: str | None = None
     speech_persona: str | None = None
     premium_voice_id: str | None = None
-    heygen_avatar_id: str | None = None
-    heygen_voice_id: str | None = None
+    ready: bool | None = None
     app_execution_mode: Literal["disabled", "approval", "auto"] | None = None
     specialist_apps: list[str] | None = None
 
@@ -142,6 +141,27 @@ class RunDetail(BaseModel):
     updated_at: datetime
 
 
+class OperatorInboxItem(BaseModel):
+    item_id: str
+    kind: str
+    title: str
+    summary: str
+    status: str
+    priority: Literal["critical", "high", "medium", "low"] = "medium"
+    source: str
+    agent_id: str | None = None
+    run_id: str | None = None
+    schedule_id: str | None = None
+    action_id: str | None = None
+    created_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorInboxResponse(BaseModel):
+    summary: dict[str, int] = Field(default_factory=dict)
+    items: list[OperatorInboxItem] = Field(default_factory=list)
+
+
 class RunMemoryResponse(BaseModel):
     run_id: str
     thread_id: str | None = None
@@ -159,6 +179,16 @@ class ThreadDetailResponse(BaseModel):
     context: str | None = None
     messages: list[dict[str, Any]] = Field(default_factory=list)
     episodes: list[EpisodeRecord] = Field(default_factory=list)
+
+
+class DocumentProcessResponse(BaseModel):
+    name: str
+    content_type: str
+    size_bytes: int
+    extracted_text: str
+    summary: str
+    sections: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ShoppingSource(BaseModel):
@@ -218,7 +248,7 @@ class LocalAppDefinition(BaseModel):
 
 class DesktopAction(BaseModel):
     action_id: str
-    kind: Literal["writer_doc", "social_package", "gmail_calendar", "ai_influencer"]
+    kind: Literal["writer_doc", "social_package", "gmail_calendar", "ai_influencer", "wellness_checkin"]
     agent_id: str
     status: Literal["queued", "completed", "blocked", "failed"]
     title: str
@@ -231,3 +261,101 @@ class DesktopAction(BaseModel):
     executed_at: str | None = None
     created_at: str
     updated_at: str
+
+
+class SchedulerAvailabilityWindow(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    start: str
+    end: str
+
+
+class SchedulerEventType(BaseModel):
+    event_type_id: str
+    name: str
+    slug: str
+    description: str = ""
+    duration_minutes: int = 30
+    buffer_before_minutes: int = 0
+    buffer_after_minutes: int = 0
+    minimum_notice_hours: int = 0
+    booking_window_days: int = 30
+    max_bookings_per_day: int = 4
+    is_active: bool = True
+
+
+class SchedulerProfile(BaseModel):
+    owner_name: str
+    public_slug: str
+    headline: str
+    bio: str
+    timezone: str
+    location_type: str
+    location_value: str
+    booking_window_days: int
+    minimum_notice_hours: int
+    max_bookings_per_day: int
+    availability: list[SchedulerAvailabilityWindow] = Field(default_factory=list)
+    blackout_dates: list[str] = Field(default_factory=list)
+    event_types: list[SchedulerEventType] = Field(default_factory=list)
+
+
+class SchedulerProfileUpdatePayload(SchedulerProfile):
+    pass
+
+
+class SchedulerPublicProfileResponse(BaseModel):
+    owner_name: str
+    public_slug: str
+    headline: str
+    bio: str
+    timezone: str
+    location_type: str
+    location_value: str
+    event_types: list[SchedulerEventType] = Field(default_factory=list)
+
+
+class SchedulerAvailabilitySlot(BaseModel):
+    start_at: str
+    end_at: str
+    label: str
+
+
+class SchedulerAvailabilityResponse(BaseModel):
+    date: str
+    timezone: str
+    event_type: SchedulerEventType
+    slots: list[SchedulerAvailabilitySlot] = Field(default_factory=list)
+
+
+class SchedulerBookingCreatePayload(BaseModel):
+    event_type_slug: str
+    start_at: str
+    name: str
+    email: str
+    notes: str = ""
+
+
+class SchedulerBooking(BaseModel):
+    booking_id: str
+    public_slug: str
+    event_type_id: str
+    event_type_slug: str
+    event_type_name: str
+    duration_minutes: int
+    status: str
+    name: str
+    email: str
+    notes: str = ""
+    location_type: str
+    location_value: str
+    timezone: str
+    start_at: str
+    end_at: str
+    created_at: str
+    confirmation_code: str
+
+
+class SchedulerDashboardResponse(BaseModel):
+    profile: SchedulerProfile
+    bookings: list[SchedulerBooking] = Field(default_factory=list)
+    metrics: dict[str, int] = Field(default_factory=dict)

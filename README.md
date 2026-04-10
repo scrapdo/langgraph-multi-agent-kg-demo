@@ -1,20 +1,23 @@
-# KG Multi-Agent Demo
+# KG Multi-Agent System
 
-A Dockerized multi-agent AI demo built around LangGraph orchestration, Neo4j lineage, Zep memory, provider-aware model routing, voice interaction, and a React operations dashboard.
+A Dockerized multi-agent AI operations system built around LangGraph orchestration, Neo4j lineage, Zep memory, provider-aware model routing, voice interaction, and a React operations dashboard.
 
 This repository is not a thin mockup. It contains a working end-to-end system with:
 - a coordinator/researcher/critic/writer workflow
+- specialist agents for shopping, social, secretary, and wellness coaching
 - graph + memory persistence
 - realtime event streaming
 - configurable agent identities and model assignments
 - voice input/output
 - open-model discovery via Hugging Face
-- avatar video generation via HeyGen
+- document processing and visual report workbenches
 - desktop automation workflows and local artifact generation
 - Google Workspace ingestion with OAuth-backed Gmail/Calendar workflows
 - scheduleable desktop workflow policies with backend dispatch support
+- an operator inbox that consolidates approvals, failures, blocked actions, and setup gaps
+- route-decision, latency, and policy-version telemetry on runs
 
-The app is designed as a live demo and architecture sandbox, not as a safety-critical production system.
+The app is designed to operate as a serious personal operations system. It is still not a safety-critical system, but it now includes approval gates, operator inboxes, schedule runners, desktop history, provider health, and specialist routing meant for real daily use.
 
 ## Contents
 - [What It Does](#what-it-does)
@@ -28,7 +31,6 @@ The app is designed as a live demo and architecture sandbox, not as a safety-cri
 - [Memory And Graph Model](#memory-and-graph-model)
 - [Model Providers](#model-providers)
 - [Voice And Speech](#voice-and-speech)
-- [HeyGen And LiveAvatar](#heygen-and-liveavatar)
 - [Hugging Face Integration](#hugging-face-integration)
 - [Environment Variables](#environment-variables)
 - [Local Development](#local-development)
@@ -60,6 +62,9 @@ The demo supports both ordinary conversation and structured task execution.
 - conditional revision loop from critic back to researcher
 - degraded fallback path on repeated failure
 - task classification so normal conversation is not forced through research templates
+- conservative specialist routing so the coordinator keeps ordinary conversation unless specialist intent is explicit or strong
+- explicit saved-name routing so named agents such as `Nora` or the wellness coach can be invoked directly
+- route decision metadata, policy version, prompt version, and per-run latency telemetry
 
 ### Graph and memory
 - Neo4j run/thread/episode/claim/entity lineage
@@ -69,11 +74,13 @@ The demo supports both ordinary conversation and structured task execution.
 
 ### Voice interaction
 - browser speech recognition for input
+- microphone-driven visualizer response while the user is speaking
 - browser speech synthesis
 - OpenAI neural TTS
 - ElevenLabs integration path
 - Hugging Face Parler TTS integration path
 - speaking/listening visualizer modes
+- coordinator acknowledgement speech before full run completion
 - interruption handling and duplicate/echo suppression
 
 ### Provider-aware routing
@@ -97,6 +104,10 @@ The demo supports both ordinary conversation and structured task execution.
 - per-agent model/provider assignment
 - org-chart display of agent hierarchy
 - theme selector
+- active agent spotlight during speech
+- predicted route badge before run start
+- actual route and latency metadata surfaced in Run Status
+- unified operator inbox for approvals, failures, blocked actions, and setup gaps
 
 ### Desktop operations
 - per-agent local app specialization policies
@@ -105,15 +116,28 @@ The demo supports both ordinary conversation and structured task execution.
 - local social package generation
 - Gmail/Calendar desktop workflows
 - AI Influencer desktop packaging
+- scheduled wellness check-in artifacts
 - desktop action history with filtering
 - bridge diagnostics for Finder, Word, and AI Influencer launch
 - persisted desktop workflow schedules
 
 ### External integrations
-- HeyGen video generation
-- HeyGen asset selection and per-agent mapping
+- Twilio / Telnyx / SendGrid / Telegram secretary dispatch path
 - Hugging Face hub/dataset/Spaces search
 - Google Workspace OAuth connect flow for Gmail/Calendar readonly workflows
+
+### Personal operations layer
+- secretary contacts with saved preferred channel/provider and richer CRM metadata
+- operator inbox summarizing approvals, failed runs, blocked actions, and config gaps
+- wellness coach agent for goals, habits, accountability, recovery, and motivation
+- desktop-scheduled wellness check-ins with reusable templates and output folders
+
+### Captain Claw-inspired surfaces
+- Flight Deck capability deck
+- browser ops workspace with saved web workflows
+- document processing workbench
+- visual run reports
+- focused operator boards instead of a permanently crowded dashboard
 
 ## Google Workspace Setup
 
@@ -216,7 +240,6 @@ flowchart LR
     API --> KG["Graph Writes"]
     API --> ZM["Memory Writes"]
     API --> TTS["Speech Providers"]
-    API --> HG["HeyGen"]
     W --> TTS
 ```
 
@@ -241,7 +264,6 @@ backend/
       run_store.py             # durable run persistence
     services/
       agent_profile_service.py # agent config persistence
-      heygen_service.py        # HeyGen API integration
       huggingface_service.py   # HF Hub, Parler, local transformers hooks
       memory_service.py        # Zep thread memory
       model_router_service.py  # provider/model resolution
@@ -255,13 +277,16 @@ backend/
 frontend/
   src/
     components/
+      CapabilityDeckPanel.tsx
+      DocumentWorkbenchPanel.tsx
+      ReportWorkbenchPanel.tsx
       RunConsole.tsx
       HealthPanel.tsx
       GraphPanel.tsx
       MemoryPanel.tsx
       AgentStudio.tsx
       HuggingFacePanel.tsx
-      HeyGenPanel.tsx
+      SecretaryPanel.tsx
     api/
       client.ts
     lib/
@@ -288,7 +313,6 @@ FastAPI service that exposes:
 - agent configuration
 - provider catalog
 - Hugging Face search
-- HeyGen video/live endpoints
 
 ### `worker`
 Celery worker for queued/background work.
@@ -347,14 +371,18 @@ Focused operator views.
 Includes:
 - Shopping Board
 - Social Ops
+- Secretary Ops
 
 ### 4. Studio
 Configuration and external system surfaces.
 
 Includes:
+- Flight Deck capability deck
 - Agent Studio
 - Hugging Face search panel
-- HeyGen panel
+- Browser Ops
+- Document Workbench
+- Report Workbench
 - Desktop Ops
 - Desktop History
 
@@ -400,6 +428,14 @@ Includes:
 - `GET /providers/catalog`
 - `GET /agents/config`
 - `PUT /agents/config`
+- `GET /browser/inspect?url=...`
+- `GET /browser/workflows`
+- `POST /browser/workflows`
+- `POST /browser/workflows/{workflow_id}/run`
+- `GET /secretary/status`
+- `POST /secretary/dispatch`
+- `POST /documents/process`
+- `GET /reports/run/{run_id}`
 
 ### Hugging Face
 - `GET /hf/status`
@@ -407,14 +443,6 @@ Includes:
 - `GET /hf/datasets`
 - `GET /hf/spaces`
 
-### HeyGen
-- `GET /heygen/assets`
-- `POST /heygen/videos`
-- `GET /heygen/videos/{video_id}`
-- `POST /heygen/live/session`
-- `POST /heygen/live/start`
-- `POST /heygen/live/task`
-- `POST /heygen/live/stop`
 
 ## Agent Workflow
 
@@ -557,6 +585,9 @@ The system supports:
 - per-agent spoken persona
 - preview speech during active runs
 - final speech after completion
+- active speaker routing through the resolved `speaker_agent`
+- coordinator acknowledgement speech before the full run finishes
+- microphone-driven visualizer motion during listening
 
 ### Important note
 Speech quality depends heavily on the selected provider.
@@ -564,18 +595,6 @@ Speech quality depends heavily on the selected provider.
 - OpenAI is integrated and usable
 - ElevenLabs path exists but requires its own key
 - Parler path exists, but HF inference responsiveness can vary
-
-## HeyGen And LiveAvatar
-
-### What is implemented
-- asset loading
-- avatar/voice selection
-- video generation from run output
-- per-agent avatar/voice mapping
-- auto-generation from writer responses
-
-### LiveAvatar state
-The code includes a migration path and session controls, but the older HeyGen interactive-avatar endpoints are deprecated.
 
 ## Desktop Automation
 
@@ -614,6 +633,96 @@ Current supported scheduled workflow kinds:
 - `inbox_triage`
 - `draft_reply_suggestions`
 
+## Secretary Agent
+
+The app now includes a secretary specialist:
+- id: `secretary`
+- default name: `Nora`
+
+Purpose:
+- place outbound calls
+- send texts
+- send emails
+- prepare appointment and follow-up tasks
+
+Current live providers:
+- Twilio for calls and SMS
+- SendGrid for email
+
+Operational route:
+- `GET /secretary/status`
+- `POST /secretary/dispatch`
+
+Important:
+- `simulation` mode is the default safe path
+- `live` mode only works when the corresponding provider credentials are configured
+
+Required env vars for live secretary actions:
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_PHONE_NUMBER`
+- `SENDGRID_API_KEY`
+- `SECRETARY_EMAIL_FROM`
+
+The demo does not silently place calls or send messages. Live execution is explicit.
+
+## Documents And Reports
+
+### Document processing
+
+The app includes a document workbench in `Studio -> Documents`.
+
+Route:
+- `POST /documents/process`
+
+Supported local demo extraction:
+- `.txt`
+- `.md`
+- `.csv`
+- `.json`
+- `.html`
+- source code files
+
+The processor returns:
+- extracted text
+- simple section detection
+- summary
+- warnings when a file type is only partially supported
+
+This is intentionally a lightweight workbench, not a full OCR or Office binary parser.
+
+### Visual reports
+
+The app includes a report workbench in `Studio -> Reports`.
+
+Route:
+- `GET /reports/run/{run_id}`
+
+The report surface:
+- renders a clean standalone HTML layout
+- prints to PDF better than the live dashboard
+- avoids the earlier issue where the full dashboard itself was being printed directly
+
+## Browser Ops
+
+The app now includes a browser operations workspace in `Studio -> Browser`.
+
+Current capabilities:
+- inspect a live URL
+- extract title, description, H1, content type, and link count
+- save rerunnable browser workflows
+- rerun saved web research sweeps from the UI
+
+Routes:
+- `GET /browser/inspect?url=...`
+- `GET /browser/workflows`
+- `POST /browser/workflows`
+- `POST /browser/workflows/{workflow_id}/run`
+
+Important scope note:
+- this is a real browser-research surface built on live page inspection and saved workflows
+- it is not yet full Playwright recording or tab automation parity
+
 Important constraint:
 - schedule persistence and backend dispatch are implemented
 - this is not yet a full user-facing automation product with recurrence editing, inbox items, and approval routing
@@ -641,17 +750,11 @@ Bridge code lives in:
 - [host_bridge/server.py](/Users/matt/Documents/new-project/host_bridge/server.py)
 - [host_bridge/README.md](/Users/matt/Documents/new-project/host_bridge/README.md)
 
-You should treat LiveAvatar as a separate product path from standard HeyGen video generation.
 
 ### Pricing status
-Based on HeyGen help-center docs current as of April 6, 2026:
-- standard HeyGen API pricing is separate from LiveAvatar pricing
 - free API credits are no longer generally offered
-- LiveAvatar migration docs mention a limited free migration/testing period, then paid plans after that
 
 References:
-- [HeyGen API pricing explained](https://help.heygen.com/en/articles/10060327-heygen-api-pricing-explained)
-- [Interactive Avatar Migration to LiveAvatar: Guide and FAQ](https://help.heygen.com/en/articles/12998652-interactive-avatar-migration-to-liveavatar-guide-and-faq)
 
 ## Hugging Face Integration
 
@@ -705,11 +808,18 @@ Copy `.env.example` to `.env`.
 - `TRANSFORMERS_USE_OPTIMUM`
 - `TRANSFORMERS_MAX_NEW_TOKENS`
 
-### HeyGen
 - `HEYGEN_API_KEY`
 - `HEYGEN_BASE_URL`
 - `HEYGEN_AVATAR_ID`
 - `HEYGEN_VOICE_ID`
+- `HEYGEN_AGENT_AUTO_SYNC`
+
+### Secretary live actions
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_PHONE_NUMBER`
+- `SENDGRID_API_KEY`
+- `SECRETARY_EMAIL_FROM`
 
 ## Local Development
 
@@ -809,7 +919,6 @@ The frontend now includes print-specific CSS so exported PDFs are readable and n
 - Speech quality is still bounded by the active TTS provider.
 - Parler TTS is integrated but HF inference latency can be inconsistent.
 - `transformers-local` is not active in the default Docker image.
-- LiveAvatar is a separate migration/pricing path from standard HeyGen video generation.
 - The worker/runtime path should be treated as a demo system until task registration and background behavior are hardened further.
 
 ## Troubleshooting
@@ -837,6 +946,3 @@ The frontend now includes print-specific CSS so exported PDFs are readable and n
 ### Hugging Face local models show disabled
 - expected unless you install local inference dependencies and configure a local model runtime
 
-### HeyGen video works but LiveAvatar does not
-- current platform behavior treats LiveAvatar as a separate migration/product path
-- standard HeyGen API enablement is not sufficient for all LiveAvatar usage

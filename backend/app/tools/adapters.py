@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import random
 import re
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
@@ -27,6 +28,366 @@ class MarketNewsTool:
         payload = {
             "items": items,
             "confidence": round(0.65 + random.random() * 0.3, 2),
+            "mode": mode,
+        }
+        return ToolResult(tool=self.name, ok=True, payload=payload)
+
+
+class GeneralNewsTool:
+    name = "general_news"
+    outlet_sources = [
+        ("Fox News", "https://www.foxnews.com/world"),
+        ("Washington Free Beacon", "https://freebeacon.com/"),
+        ("Wall Street Journal", "https://www.wsj.com/news"),
+        ("National Review", "https://www.nationalreview.com/latest/"),
+        ("The Baltimore Banner", "https://www.thebaltimorebanner.com/"),
+        ("Baltimore Sun", "https://www.baltimoresun.com/"),
+        ("WBAL-TV", "https://www.wbaltv.com/local-news"),
+        ("WMAR", "https://www.wmar2news.com/local"),
+        ("CBS News", "https://www.cbsnews.com/"),
+        ("AP News", "https://apnews.com/"),
+        ("Reuters", "https://www.reuters.com/world/"),
+    ]
+
+    blocked_path_fragments = [
+        "/author/",
+        "/authors/",
+        "/topic/",
+        "/topics/",
+        "/tag/",
+        "/tags/",
+        "/video",
+        "/videos",
+        "/watch",
+        "/listen",
+        "/podcast",
+        "/podcasts",
+        "/live",
+        "/nowcast",
+        "/newsletter",
+        "/newsletters",
+        "/e-newspaper",
+        "/enewspaper",
+        "/digitaledition",
+        "/shortcode/",
+        "/util-",
+        "/account/",
+        "/profile/",
+        "/search",
+        "/weather",
+        "/sports/",
+        "/opinion/",
+        "/opinion",
+    ]
+
+    allowed_domain_patterns: dict[str, list[str]] = {
+        "foxnews.com": ["/politics/", "/world/", "/us/", "/media/", "/health/", "/tech/"],
+        "freebeacon.com": ["/issues/", "/politics/", "/media/", "/trump-administration/", "/biden-administration/"],
+        "wsj.com": ["/articles/"],
+        "nationalreview.com": ["/news/", "/the-morning-jolt/", "/corner/"],
+        "thebaltimorebanner.com": ["/community/", "/education/", "/economy/", "/politics-power/", "/crime-justice/", "/culture/"],
+        "baltimoresun.com": ["/202", "/news/", "/politics/", "/business/"],
+        "wbaltv.com": ["/article/"],
+        "wmar2news.com": ["/news/"],
+        "cbsnews.com": ["/news/", "/world/", "/politics/"],
+        "apnews.com": ["/article/"],
+        "reuters.com": ["/world/", "/business/", "/markets/", "/technology/"],
+    }
+
+    preferred_topic_keywords: dict[str, list[str]] = {
+        "foxnews.com": ["iran", "israel", "trump", "court", "congress", "border", "china", "russia", "war", "tariff"],
+        "freebeacon.com": ["iran", "china", "trump", "biden", "court", "congress", "sanctions", "border"],
+        "wsj.com": ["markets", "economy", "fed", "tariff", "china", "business", "stocks", "trump"],
+        "nationalreview.com": ["court", "congress", "trump", "iran", "china", "border", "policy"],
+        "thebaltimorebanner.com": ["maryland", "baltimore", "crime", "justice", "government", "school", "budget", "transportation"],
+        "baltimoresun.com": ["maryland", "baltimore", "crime", "government", "school", "transportation", "budget"],
+        "wbaltv.com": ["maryland", "baltimore", "shooting", "government", "school", "storm", "police"],
+        "wmar2news.com": ["maryland", "baltimore", "shooting", "government", "school", "police", "court"],
+        "cbsnews.com": ["trump", "iran", "israel", "china", "court", "congress", "election", "storm"],
+        "apnews.com": ["trump", "iran", "israel", "china", "court", "congress", "war", "election"],
+        "reuters.com": ["trump", "iran", "israel", "china", "markets", "economy", "fed", "war"],
+    }
+
+    baltimore_local_keywords = [
+        "baltimore",
+        "maryland",
+        "anne arundel",
+        "harford",
+        "howard county",
+        "city hall",
+        "county council",
+        "police",
+        "shooting",
+        "school",
+        "budget",
+        "transit",
+        "transportation",
+        "crime",
+        "government",
+        "public safety",
+    ]
+
+    baltimore_top_tier_keywords = [
+        "city hall",
+        "mayor",
+        "city council",
+        "county council",
+        "budget",
+        "public safety",
+        "police",
+        "shooting",
+        "murder",
+        "crime",
+        "government",
+        "school board",
+        "transit",
+        "bridge",
+        "water",
+        "infrastructure",
+        "transportation",
+    ]
+
+    baltimore_mid_tier_keywords = [
+        "utility",
+        "parking",
+        "xfinity",
+        "blackout",
+        "development",
+        "housing",
+        "business",
+        "rates",
+        "county",
+        "officials",
+    ]
+
+    baltimore_low_tier_keywords = [
+        "crash",
+        "officer injured",
+        "sentenced",
+        "dui",
+        "feature",
+        "college",
+        "university",
+        "arts",
+        "culture",
+    ]
+
+    baltimore_soft_keywords = [
+        "education",
+        "culture",
+        "arts",
+        "lifestyle",
+        "food",
+        "restaurant",
+        "travel",
+        "sports",
+        "universities",
+        "college",
+        "feature",
+    ]
+
+    national_carryover_keywords = [
+        "iran",
+        "israel",
+        "china",
+        "trump",
+        "ceasefire",
+        "war",
+        "congress",
+        "supreme court",
+        "white house",
+        "fed",
+        "tariff",
+    ]
+
+    blocked_title_keywords = [
+        "bracket",
+        "march madness",
+        "nfl",
+        "nba",
+        "mlb",
+        "nhl",
+        "fox nation",
+        "video",
+        "watch",
+        "stream",
+        "podcast",
+        "crossword",
+        "horoscope",
+        "games",
+        "puzzles",
+        "search baltimore crime data",
+        "crime data",
+    ]
+
+    def _looks_like_headline(self, title: str) -> bool:
+        cleaned = title.strip()
+        if len(cleaned) < 28 or len(cleaned) > 180:
+            return False
+        lower = cleaned.lower()
+        blocked_titles = {
+            "home",
+            "latest",
+            "latest news",
+            "news",
+            "world",
+            "video",
+            "videos",
+            "watch live",
+            "read more",
+            "opinion",
+        }
+        if lower in blocked_titles:
+            return False
+        if cleaned.count(" ") < 4:
+            return False
+        if re.search(r"\b(author|authors|topic|topics|newsletter|nowcast|watch on demand|enewspaper|fox nation)\b", lower):
+            return False
+        if any(keyword in lower for keyword in self.blocked_title_keywords):
+            return False
+        return True
+
+    def _is_valid_article_url(self, url: str, domain: str) -> bool:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        if not path or path in {"/", ""}:
+            return False
+        if any(fragment in path for fragment in self.blocked_path_fragments):
+            return False
+        if any(fragment in path for fragment in ["/crime-data", "/crime-data/", "/crime-numbers", "/crime-stats"]):
+            return False
+        allowed = self.allowed_domain_patterns.get(domain, [])
+        if allowed and not any(fragment in path for fragment in allowed):
+            return False
+        if path.count("/") < 2:
+            return False
+        return True
+
+    def _extract_candidate_links(self, body: str, source_url: str) -> list[dict[str, str]]:
+        parsed_source = urlparse(source_url)
+        domain = parsed_source.netloc.replace("www.", "")
+        matches = re.findall(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', body, flags=re.IGNORECASE | re.DOTALL)
+        results: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for href, title_html in matches:
+            title = html.unescape(re.sub(r"<.*?>", "", " ".join(title_html.split()))).strip()
+            if not self._looks_like_headline(title):
+                continue
+            if href.startswith("/"):
+                href = f"{parsed_source.scheme}://{parsed_source.netloc}{href}"
+            elif href.startswith("//"):
+                href = f"{parsed_source.scheme}:{href}"
+            if not href.startswith("http"):
+                continue
+            target = urlparse(href)
+            target_domain = target.netloc.replace("www.", "")
+            if target_domain and target_domain != domain:
+                continue
+            normalized_url = href.split("#", 1)[0]
+            if not self._is_valid_article_url(normalized_url, domain):
+                continue
+            if normalized_url in seen:
+                continue
+            seen.add(normalized_url)
+            results.append({"title": title, "url": normalized_url, "domain": domain})
+            if len(results) >= 3:
+                break
+        return results
+
+    def _score_candidate(self, candidate: dict[str, str], query: str, news_mode: str = "national_major") -> int:
+        domain = candidate["domain"]
+        title = candidate["title"].lower()
+        url = candidate["url"].lower()
+        score = 0
+
+        preferred = self.preferred_topic_keywords.get(domain, [])
+        score += sum(6 for keyword in preferred if keyword in title)
+        score += sum(3 for keyword in preferred if keyword in url)
+
+        major_news_terms = [
+            "breaking",
+            "trump",
+            "iran",
+            "israel",
+            "china",
+            "court",
+            "congress",
+            "ceasefire",
+            "war",
+            "economy",
+            "markets",
+            "fed",
+            "maryland",
+            "baltimore",
+            "police",
+            "government",
+        ]
+        score += sum(2 for keyword in major_news_terms if keyword in title)
+
+        if any(keyword in title for keyword in ["opinion", "editorial", "analysis", "review", "column"]):
+            score -= 6
+        if any(keyword in title for keyword in ["sports", "bracket", "final four", "baseball", "football", "basketball"]):
+            score -= 10
+        if any(keyword in url for keyword in ["/sports/", "/opinion/", "/entertainment/", "/lifestyle/"]):
+            score -= 8
+        if query:
+            query_terms = [term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 3]
+            score += sum(1 for term in query_terms if term in title)
+
+        if news_mode == "baltimore_local":
+            local_domains = {"thebaltimorebanner.com", "baltimoresun.com", "wbaltv.com", "wmar2news.com"}
+            if domain not in local_domains:
+                return -999
+            score += sum(8 for keyword in self.baltimore_local_keywords if keyword in title)
+            score += sum(4 for keyword in self.baltimore_local_keywords if keyword in url)
+            score += sum(10 for keyword in self.baltimore_top_tier_keywords if keyword in title)
+            score += sum(5 for keyword in self.baltimore_top_tier_keywords if keyword in url)
+            score += sum(4 for keyword in self.baltimore_mid_tier_keywords if keyword in title)
+            score += sum(2 for keyword in self.baltimore_mid_tier_keywords if keyword in url)
+            score -= sum(5 for keyword in self.baltimore_low_tier_keywords if keyword in title)
+            score -= sum(2 for keyword in self.baltimore_low_tier_keywords if keyword in url)
+            score -= sum(7 for keyword in self.national_carryover_keywords if keyword in title)
+            score -= sum(3 for keyword in self.national_carryover_keywords if keyword in url)
+            score -= sum(4 for keyword in self.baltimore_soft_keywords if keyword in title)
+            if domain in {"thebaltimorebanner.com", "baltimoresun.com"} and any(keyword in title for keyword in self.baltimore_soft_keywords):
+                score -= 5
+        return score
+
+    async def _fetch_outlet_candidates(self, client: httpx.AsyncClient, label: str, url: str) -> list[dict[str, str]]:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            candidates = self._extract_candidate_links(response.text, url)
+            if candidates:
+                return candidates
+        except Exception:
+            return []
+        return []
+
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=1, max=6))
+    async def run(self, query: str, mode: str, news_mode: str = "national_major") -> ToolResult:
+        if news_mode == "baltimore_local":
+            selected_sources = [item for item in self.outlet_sources if item[0] in {"The Baltimore Banner", "Baltimore Sun", "WBAL-TV", "WMAR"}]
+        elif news_mode == "mixed":
+            selected_sources = self.outlet_sources
+        else:
+            selected_sources = [item for item in self.outlet_sources if item[0] not in {"The Baltimore Banner", "Baltimore Sun", "WBAL-TV", "WMAR"}]
+        async with httpx.AsyncClient(timeout=12, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            candidate_lists = await asyncio.gather(
+                *(self._fetch_outlet_candidates(client, label, url) for label, url in selected_sources)
+            )
+        ranked: list[dict[str, str]] = []
+        for candidates in candidate_lists:
+            if candidates:
+                best = max(candidates, key=lambda candidate: self._score_candidate(candidate, query, news_mode))
+                if self._score_candidate(best, query, news_mode) > 0:
+                    ranked.append(best)
+        items = [f"{item['title']} [{item['domain']}]" for item in ranked[:6]]
+        payload = {
+            "items": items,
+            "results": ranked[:6],
+            "source_type": "direct_outlet_scrape",
+            "news_mode": news_mode,
             "mode": mode,
         }
         return ToolResult(tool=self.name, ok=True, payload=payload)
@@ -310,6 +671,7 @@ class SocialPublishTool:
 
 
 MARKET_NEWS_TOOL = MarketNewsTool()
+GENERAL_NEWS_TOOL = GeneralNewsTool()
 CONTENT_PUBLISH_TOOL = ContentPublishTool()
 HUGGINGFACE_DISCOVERY_TOOL = HuggingFaceDiscoveryTool()
 SHOPPING_SCOUT_TOOL = ShoppingScoutTool()
@@ -334,6 +696,7 @@ INSTAGRAM_PUBLISH_TOOL = SocialPublishTool(
 )
 TOOLS = [
     MARKET_NEWS_TOOL,
+    GENERAL_NEWS_TOOL,
     HUGGINGFACE_DISCOVERY_TOOL,
     SHOPPING_SCOUT_TOOL,
     SHOPPING_SEARCH_TOOL,

@@ -1,5 +1,5 @@
-import { ChangeEvent, useEffect, useMemo, useState } from 'react';
-import { getAgentProfiles, getLocalAppsCatalog, getProvidersCatalog, updateAgentProfiles } from '../api/client';
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { getAgentProfiles, getLocalAppsCatalog, getProvidersCatalog, installPlaywrightPresets, testTts, updateAgentProfiles } from '../api/client';
 import {
   buildCuratedOpenRouterPresets,
   loadJsonArray,
@@ -10,7 +10,7 @@ import {
 import type { ThemeId } from '../lib/themes';
 import type { AgentProfile, LocalAppDefinition, ProvidersCatalog } from '../types';
 
-const SPEECH_VOICES = ['verse', 'aria', 'ash', 'sage', 'alloy'];
+const SPEECH_VOICES = ['alloy', 'ash', 'coral', 'sage', 'shimmer', 'verse'];
 const SPEECH_STYLES = ['natural', 'warm', 'energetic', 'precise', 'cinematic'];
 
 function isImageAvatar(value: string) {
@@ -86,6 +86,9 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
   const [uploadedFileNames, setUploadedFileNames] = useState<Record<string, string>>({});
   const [presetName, setPresetName] = useState('');
   const [presets, setPresets] = useState<SystemPreset[]>([]);
+  const [testingVoiceId, setTestingVoiceId] = useState<string | null>(null);
+  const [voiceTestError, setVoiceTestError] = useState<Record<string, string>>({});
+  const voiceTestAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -106,7 +109,7 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
     () => ({
       coordinator: draft.coordinator,
       row2: [draft.researcher, draft.critic, draft.writer].filter(Boolean) as AgentProfile[],
-      row3: [draft.coding, draft.shopper, draft.social].filter(Boolean) as AgentProfile[],
+      row3: [draft.coding, draft.shopper, draft.social, draft.secretary, draft.wellness].filter(Boolean) as AgentProfile[],
     }),
     [draft],
   );
@@ -173,8 +176,7 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
           speech_style: profile.speech_style,
           speech_persona: profile.speech_persona,
           premium_voice_id: profile.premium_voice_id,
-          heygen_avatar_id: profile.heygen_avatar_id,
-          heygen_voice_id: profile.heygen_voice_id,
+          ready: profile.ready,
           app_execution_mode: profile.app_execution_mode,
           specialist_apps: profile.specialist_apps,
         };
@@ -202,6 +204,38 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
       }
       return next;
     });
+  };
+
+  const testAgentVoice = async (agent: AgentProfile) => {
+    setTestingVoiceId(agent.id);
+    setVoiceTestError((prev) => ({ ...prev, [agent.id]: '' }));
+    try {
+      const blob = await testTts({
+        text: `Hello. I am ${agent.name}. This is a voice test.`,
+        agentId: agent.id,
+        provider: 'elevenlabs',
+        voice: agent.speech_voice,
+        premiumVoiceId: agent.premium_voice_id,
+        profile: agent.speech_style,
+        persona: agent.speech_persona,
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      if (voiceTestAudioRef.current) {
+        voiceTestAudioRef.current.pause();
+      }
+      const audio = new Audio(objectUrl);
+      voiceTestAudioRef.current = audio;
+      audio.onended = () => URL.revokeObjectURL(objectUrl);
+      audio.onerror = () => URL.revokeObjectURL(objectUrl);
+      await audio.play();
+    } catch (error) {
+      setVoiceTestError((prev) => ({
+        ...prev,
+        [agent.id]: error instanceof Error ? error.message : 'Voice test failed.',
+      }));
+    } finally {
+      setTestingVoiceId(null);
+    }
   };
 
   const savePreset = () => {
@@ -256,8 +290,8 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
           ))}
         </div>
         <div className="org-link vertical" />
-        <div className="org-link horizontal three" />
-        <div className="org-row bottom three">
+        <div className="org-link horizontal five" />
+        <div className="org-row bottom five">
           {org.row3.map((a) => (
             <OrgNode key={a.id} agent={a} />
           ))}
@@ -414,21 +448,31 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
                 placeholder="Optional ElevenLabs voice ID"
               />
             </label>
-            <label>
-              HeyGen Avatar ID
+            <p className="muted small">
+              Live conversation audio uses ElevenLabs when the active voice engine is set to `ElevenLabs` and this
+              agent has a `Premium Voice ID`.
+            </p>
+            <div className="action-row">
+              <button type="button" className="ghost-button" onClick={() => void testAgentVoice(agent)} disabled={testingVoiceId === agent.id}>
+                {testingVoiceId === agent.id ? 'Testing Voice...' : 'Test Voice'}
+              </button>
+              {voiceTestError[agent.id] ? <span className="muted small">{voiceTestError[agent.id]}</span> : null}
+            </div>
+            <label className="checkbox-row">
               <input
-                value={agent.heygen_avatar_id}
-                onChange={(e) => updateField(agent.id, 'heygen_avatar_id', e.target.value)}
-                placeholder="Optional HeyGen avatar id"
+                type="checkbox"
+                checked={agent.ready}
+                onChange={(e) =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    [agent.id]: {
+                      ...prev[agent.id],
+                      ready: e.target.checked,
+                    },
+                  }))
+                }
               />
-            </label>
-            <label>
-              HeyGen Voice ID
-              <input
-                value={agent.heygen_voice_id}
-                onChange={(e) => updateField(agent.id, 'heygen_voice_id', e.target.value)}
-                placeholder="Optional HeyGen voice id"
-              />
+              Mark profile complete
             </label>
             <label>
               Local App Execution
@@ -452,6 +496,15 @@ export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
                     <span>{app.label}</span>
                   </label>
                 ))}
+              </div>
+            </div>
+            <div className="app-specializations">
+              <strong>Browser Packs</strong>
+              <p className="muted small">Install the saved browser script pack for this agent into Browser Ops.</p>
+              <div className="action-row">
+                <button type="button" className="ghost-button" onClick={() => void installPlaywrightPresets(agent.id)}>
+                  Install {agent.id} Browser Pack
+                </button>
               </div>
             </div>
           </article>

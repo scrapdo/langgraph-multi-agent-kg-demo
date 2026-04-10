@@ -4,27 +4,40 @@ import type {
   GraphResponse,
   HuggingFaceSearchResponse,
   HuggingFaceStatus,
-  HeyGenAssetsResponse,
   ProvidersCatalog,
   RunDetail,
   RunMemoryResponse,
   RunMode,
   RunResponse,
   LocalAppDefinition,
+  OperatorInboxResponse,
   DesktopAction,
   DesktopSchedule,
+  DesktopSchedulePreset,
+  BrowserInspectionResult,
+  BrowserWorkflow,
+  DocumentProcessResponse,
+  PlaywrightScript,
+  PlaywrightScriptPreset,
+  SchedulerAvailabilityResponse,
+  SchedulerBooking,
+  SchedulerDashboardResponse,
+  SchedulerProfile,
+  SchedulerPublicProfile,
   ShoppingSummaryResponse,
   SocialSummaryResponse,
+  SecretaryDispatchRequest,
+  SecretaryContactPreference,
   ThreadDetailResponse,
 } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
-export async function startRun(task: string, mode: RunMode): Promise<RunResponse> {
+export async function startRun(task: string, mode: RunMode, conservativeSpecialistRouting = false): Promise<RunResponse> {
   const res = await fetch(`${API_BASE}/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task, mode }),
+    body: JSON.stringify({ task, mode, conservative_specialist_routing: conservativeSpecialistRouting }),
   });
   if (!res.ok) throw new Error(`Failed to start run: ${res.status}`);
   return res.json();
@@ -64,6 +77,215 @@ export async function getGraph(
 export async function getHealth(): Promise<Record<string, unknown>> {
   const res = await fetch(`${API_BASE}/health`);
   if (!res.ok) throw new Error(`Failed to fetch health: ${res.status}`);
+  return res.json();
+}
+
+export async function getOperatorInbox(limit = 40): Promise<OperatorInboxResponse> {
+  const res = await fetch(`${API_BASE}/ops/inbox?limit=${encodeURIComponent(String(limit))}`);
+  if (!res.ok) throw new Error(`Failed to fetch operator inbox: ${res.status}`);
+  return res.json();
+}
+
+export async function getSchedulerDashboard(): Promise<SchedulerDashboardResponse> {
+  const res = await fetch(`${API_BASE}/scheduler`);
+  if (!res.ok) throw new Error(`Failed to fetch scheduler dashboard: ${res.status}`);
+  return res.json();
+}
+
+export async function getSchedulerProfile(): Promise<SchedulerProfile> {
+  const res = await fetch(`${API_BASE}/scheduler/profile`);
+  if (!res.ok) throw new Error(`Failed to fetch scheduler profile: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSchedulerProfile(payload: SchedulerProfile): Promise<SchedulerProfile> {
+  const res = await fetch(`${API_BASE}/scheduler/profile`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Failed to update scheduler profile: ${res.status}`);
+  return res.json();
+}
+
+export async function getPublicSchedulerProfile(slug: string): Promise<SchedulerPublicProfile> {
+  const res = await fetch(`${API_BASE}/scheduler/public/${encodeURIComponent(slug)}`);
+  if (!res.ok) throw new Error(`Failed to fetch public scheduler profile: ${res.status}`);
+  return res.json();
+}
+
+export async function getPublicSchedulerAvailability(slug: string, eventType: string, date: string): Promise<SchedulerAvailabilityResponse> {
+  const query = new URLSearchParams({ event_type: eventType, date });
+  const res = await fetch(`${API_BASE}/scheduler/public/${encodeURIComponent(slug)}/availability?${query.toString()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to fetch scheduler availability: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function createPublicSchedulerBooking(
+  slug: string,
+  payload: { event_type_slug: string; start_at: string; name: string; email: string; notes?: string },
+): Promise<SchedulerBooking> {
+  const res = await fetch(`${API_BASE}/scheduler/public/${encodeURIComponent(slug)}/book`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to create booking: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function getSecretaryStatus(): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}/secretary/status`);
+  if (!res.ok) throw new Error(`Failed to fetch secretary status: ${res.status}`);
+  return res.json();
+}
+
+export async function dispatchSecretaryAction(payload: SecretaryDispatchRequest) {
+  const res = await fetch(`${API_BASE}/secretary/dispatch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text);
+      throw new Error(parsed.detail || `Failed to dispatch secretary action: ${res.status}`);
+    } catch {
+      throw new Error(text || `Failed to dispatch secretary action: ${res.status}`);
+    }
+  }
+  return res.json();
+}
+
+export async function getSecretaryContacts(): Promise<{ contacts: SecretaryContactPreference[] }> {
+  const res = await fetch(`${API_BASE}/secretary/contacts`);
+  if (!res.ok) throw new Error(`Failed to fetch secretary contacts: ${res.status}`);
+  return res.json();
+}
+
+export async function saveSecretaryContact(payload: SecretaryContactPreference) {
+  const res = await fetch(`${API_BASE}/secretary/contacts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to save secretary contact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function processDocument(file: File): Promise<DocumentProcessResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/documents/process`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) throw new Error(`Failed to process document: ${res.status}`);
+  return res.json();
+}
+
+export function getRunReportUrl(runId: string) {
+  return `${API_BASE}/reports/run/${encodeURIComponent(runId)}`;
+}
+
+export async function inspectBrowserUrl(url: string): Promise<BrowserInspectionResult> {
+  const query = new URLSearchParams({ url });
+  const res = await fetch(`${API_BASE}/browser/inspect?${query.toString()}`);
+  if (!res.ok) throw new Error(`Failed to inspect browser URL: ${res.status}`);
+  return res.json();
+}
+
+export async function getBrowserWorkflows(): Promise<{ workflows: BrowserWorkflow[] }> {
+  const res = await fetch(`${API_BASE}/browser/workflows`);
+  if (!res.ok) throw new Error(`Failed to fetch browser workflows: ${res.status}`);
+  return res.json();
+}
+
+export async function saveBrowserWorkflow(payload: Partial<BrowserWorkflow> & { name: string; start_url: string; goal?: string; urls?: string[]; agent_id?: string; mode?: RunMode }) {
+  const res = await fetch(`${API_BASE}/browser/workflows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Failed to save browser workflow: ${res.status}`);
+  return res.json();
+}
+
+export async function runBrowserWorkflow(workflowId: string): Promise<{ workflow: BrowserWorkflow; results: BrowserInspectionResult[] }> {
+  const res = await fetch(`${API_BASE}/browser/workflows/${encodeURIComponent(workflowId)}/run`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Failed to run browser workflow: ${res.status}`);
+  return res.json();
+}
+
+export async function getPlaywrightStatus(): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}/browser/playwright/status`);
+  if (!res.ok) throw new Error(`Failed to fetch Playwright status: ${res.status}`);
+  return res.json();
+}
+
+export async function getPlaywrightScripts(): Promise<{ scripts: PlaywrightScript[] }> {
+  const res = await fetch(`${API_BASE}/browser/playwright/scripts`);
+  if (!res.ok) throw new Error(`Failed to fetch Playwright scripts: ${res.status}`);
+  return res.json();
+}
+
+export async function getPlaywrightPresets(): Promise<{ presets: PlaywrightScriptPreset[] }> {
+  const res = await fetch(`${API_BASE}/browser/playwright/presets`);
+  if (!res.ok) throw new Error(`Failed to fetch Playwright presets: ${res.status}`);
+  return res.json();
+}
+
+export async function installPlaywrightPresets(agentId: string, presetIds?: string[]) {
+  const res = await fetch(`${API_BASE}/browser/playwright/presets/install`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agent_id: agentId, preset_ids: presetIds }),
+  });
+  if (!res.ok) throw new Error(`Failed to install Playwright presets: ${res.status}`);
+  return res.json();
+}
+
+export async function savePlaywrightScript(payload: Partial<PlaywrightScript> & { name: string; start_url: string; steps: Array<Record<string, unknown>>; agent_id?: string }) {
+  const res = await fetch(`${API_BASE}/browser/playwright/scripts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Failed to save Playwright script: ${res.status}`);
+  return res.json();
+}
+
+export async function deletePlaywrightScript(scriptId: string) {
+  const res = await fetch(`${API_BASE}/browser/playwright/scripts/${encodeURIComponent(scriptId)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Failed to delete Playwright script: ${res.status}`);
+  return res.json();
+}
+
+export async function runPlaywrightScript(scriptId: string): Promise<{ script: PlaywrightScript; results: Array<Record<string, unknown>> }> {
+  const res = await fetch(`${API_BASE}/browser/playwright/scripts/${encodeURIComponent(scriptId)}/run`, { method: 'POST' });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text);
+  }
+  return res.json();
+}
+
+export async function approvePlaywrightScript(scriptId: string): Promise<{ script: PlaywrightScript; results: Array<Record<string, unknown>> }> {
+  const res = await fetch(`${API_BASE}/browser/playwright/scripts/${encodeURIComponent(scriptId)}/approve`, { method: 'POST' });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text);
+  }
   return res.json();
 }
 
@@ -149,6 +371,12 @@ export async function getDesktopSchedules(): Promise<{ schedules: DesktopSchedul
   return res.json();
 }
 
+export async function getDesktopSchedulePresets(): Promise<{ destination_presets: DesktopSchedulePreset[]; template_presets: DesktopSchedulePreset[] }> {
+  const res = await fetch(`${API_BASE}/desktop/schedules/presets`);
+  if (!res.ok) throw new Error(`Failed to fetch desktop schedule presets: ${res.status}`);
+  return res.json();
+}
+
 export async function upsertDesktopSchedule(payload: Partial<DesktopSchedule> & { name: string; workflow_kind: string; agent_id: string; cadence_label: string; rrule: string; notes?: string[]; enabled?: boolean }) {
   const res = await fetch(`${API_BASE}/desktop/schedules`, {
     method: 'POST',
@@ -162,6 +390,42 @@ export async function upsertDesktopSchedule(payload: Partial<DesktopSchedule> & 
 export async function dispatchDesktopSchedules() {
   const res = await fetch(`${API_BASE}/desktop/schedules/dispatch`, { method: 'POST' });
   if (!res.ok) throw new Error(`Failed to dispatch desktop schedules: ${res.status}`);
+  return res.json();
+}
+
+export async function approveDesktopSchedule(scheduleId: string) {
+  const res = await fetch(`${API_BASE}/desktop/schedules/${encodeURIComponent(scheduleId)}/approve`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Failed to approve desktop schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function rejectDesktopSchedule(scheduleId: string) {
+  const res = await fetch(`${API_BASE}/desktop/schedules/${encodeURIComponent(scheduleId)}/reject`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Failed to reject desktop schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function cloneDesktopSchedule(scheduleId: string) {
+  const res = await fetch(`${API_BASE}/desktop/schedules/${encodeURIComponent(scheduleId)}/clone`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Failed to clone desktop schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function pauseDesktopSchedule(scheduleId: string) {
+  const res = await fetch(`${API_BASE}/desktop/schedules/${encodeURIComponent(scheduleId)}/pause`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Failed to pause desktop schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function resumeDesktopSchedule(scheduleId: string) {
+  const res = await fetch(`${API_BASE}/desktop/schedules/${encodeURIComponent(scheduleId)}/resume`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Failed to resume desktop schedule: ${res.status}`);
+  return res.json();
+}
+
+export async function deleteDesktopSchedule(scheduleId: string) {
+  const res = await fetch(`${API_BASE}/desktop/schedules/${encodeURIComponent(scheduleId)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(`Failed to delete desktop schedule: ${res.status}`);
   return res.json();
 }
 
@@ -247,8 +511,6 @@ export async function updateAgentProfiles(
       speech_style: string;
       speech_persona: string;
       premium_voice_id: string;
-      heygen_avatar_id: string;
-      heygen_voice_id: string;
       app_execution_mode: 'disabled' | 'approval' | 'auto';
       specialist_apps: string[];
     }>
@@ -296,70 +558,54 @@ export async function getRunSpeech(
   if (options?.premiumVoiceId) query.set('premium_voice_id', options.premiumVoiceId);
   if (options?.persona) query.set('persona', options.persona);
   const res = await fetch(`${API_BASE}/runs/${runId}/speech?${query.toString()}`);
-  if (!res.ok) throw new Error(`Failed to fetch speech audio: ${res.status}`);
+  if (!res.ok) {
+    let detail = `Failed to fetch speech audio: ${res.status}`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail) detail = String(payload.detail);
+    } catch {
+      // Keep the generic message if the error body is not JSON.
+    }
+    throw new Error(detail);
+  }
   return res.blob();
 }
 
-export async function getHeyGenAssets(): Promise<HeyGenAssetsResponse> {
-  const res = await fetch(`${API_BASE}/heygen/assets`);
-  if (!res.ok) throw new Error(`Failed to fetch HeyGen assets: ${res.status}`);
-  return res.json();
-}
-
-export async function createHeyGenVideo(script: string, avatarId: string, voiceId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/heygen/videos`, {
+export async function testTts(
+  options?: {
+    text?: string;
+    agentId?: string;
+    provider?: string;
+    voice?: string;
+    premiumVoiceId?: string;
+    profile?: string;
+    persona?: string;
+  },
+): Promise<Blob> {
+  const res = await fetch(`${API_BASE}/tts/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ script, avatar_id: avatarId, voice_id: voiceId }),
+    body: JSON.stringify({
+      text: options?.text,
+      agent_id: options?.agentId,
+      provider: options?.provider,
+      voice: options?.voice,
+      premium_voice_id: options?.premiumVoiceId,
+      profile: options?.profile,
+      persona: options?.persona,
+    }),
   });
-  if (!res.ok) throw new Error(`Failed to create HeyGen video: ${res.status}`);
-  return res.json();
-}
-
-export async function getHeyGenVideoStatus(videoId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/heygen/videos/${encodeURIComponent(videoId)}`);
-  if (!res.ok) throw new Error(`Failed to fetch HeyGen video status: ${res.status}`);
-  return res.json();
-}
-
-export async function createHeyGenLiveSession(avatarId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/heygen/live/session`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ avatar_id: avatarId }),
-  });
-  if (!res.ok) throw new Error(`Failed to create HeyGen live session: ${res.status}`);
-  return res.json();
-}
-
-export async function startHeyGenLiveSession(sessionId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/heygen/live/start`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  if (!res.ok) throw new Error(`Failed to start HeyGen live session: ${res.status}`);
-  return res.json();
-}
-
-export async function sendHeyGenLiveTask(sessionId: string, text: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/heygen/live/task`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId, text }),
-  });
-  if (!res.ok) throw new Error(`Failed to send HeyGen live task: ${res.status}`);
-  return res.json();
-}
-
-export async function stopHeyGenLiveSession(sessionId: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/heygen/live/stop`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  if (!res.ok) throw new Error(`Failed to stop HeyGen live session: ${res.status}`);
-  return res.json();
+  if (!res.ok) {
+    let detail = `Failed to test TTS: ${res.status}`;
+    try {
+      const payload = await res.json();
+      if (payload?.detail) detail = String(payload.detail);
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+  return res.blob();
 }
 
 export async function getHuggingFaceStatus(): Promise<HuggingFaceStatus> {

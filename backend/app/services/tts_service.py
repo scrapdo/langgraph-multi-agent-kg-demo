@@ -9,6 +9,20 @@ from app.services.huggingface_service import huggingface_service
 
 
 class RoutedTTSService:
+    _OPENAI_VOICE_ALIASES = {
+        "aria": "shimmer",
+    }
+    _OPENAI_ALLOWED_VOICES = {
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "sage",
+        "shimmer",
+        "verse",
+    }
+
     def _prepare_text_for_speech(self, text: str) -> str:
         cleaned = " ".join(text.split())
         cleaned = cleaned.replace(" - ", ", ")
@@ -53,6 +67,14 @@ class RoutedTTSService:
             return f"{base_prompt} Persona: {persona.strip()}", speed
         return base_prompt, speed
 
+    def _resolve_openai_voice(self, voice: str | None) -> str:
+        requested = (voice or settings.openai_tts_voice or "alloy").strip().lower()
+        normalized = self._OPENAI_VOICE_ALIASES.get(requested, requested)
+        if normalized in self._OPENAI_ALLOWED_VOICES:
+            return normalized
+        fallback = (settings.openai_tts_voice or "alloy").strip().lower()
+        return fallback if fallback in self._OPENAI_ALLOWED_VOICES else "alloy"
+
     async def _synthesize_openai(
         self,
         text: str,
@@ -68,7 +90,7 @@ class RoutedTTSService:
         prepared_text = self._prepare_text_for_speech(text)
         payload = {
             "model": settings.openai_tts_model,
-            "voice": voice or settings.openai_tts_voice,
+            "voice": self._resolve_openai_voice(voice),
             "input": prepared_text,
             "format": audio_format,
             "instructions": instructions,
@@ -116,8 +138,6 @@ class RoutedTTSService:
             "model_id": settings.elevenlabs_tts_model,
             "voice_settings": voice_settings_map.get(speech_profile, voice_settings_map["natural"]),
         }
-        if persona.strip():
-            payload["text"] = f"{persona.strip()}\n\n{payload['text']}"
 
         endpoint = f"{settings.elevenlabs_base_url.rstrip('/')}/text-to-speech/{resolved_voice_id}"
         headers = {

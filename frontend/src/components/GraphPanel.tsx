@@ -5,6 +5,7 @@ import type { GraphNode, GraphResponse } from '../types';
 const LABEL_COLORS: Record<string, string> = {
   Agent: '#22d3ee',
   Run: '#f59e0b',
+  Schedule: '#f97316',
   Thread: '#fb7185',
   Episode: '#34d399',
   Claim: '#a78bfa',
@@ -65,6 +66,7 @@ export function GraphPanel({ runId, threadId }: Props) {
   const [graph, setGraph] = useState<GraphResponse>({ nodes: [], edges: [] });
   const [query, setQuery] = useState('');
   const [activeLabels, setActiveLabels] = useState<string[]>([]);
+  const [activeShortcut, setActiveShortcut] = useState('all');
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -89,19 +91,91 @@ export function GraphPanel({ runId, threadId }: Props) {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const useLabelFilter = activeLabels.length > 0;
+    const pendingScheduleIds = new Set(
+      graph.nodes
+        .filter((node) => node.labels.includes('Schedule') && String(node.properties.last_run_status || '') === 'awaiting_approval')
+        .map((node) => node.id),
+    );
+    const rejectedScheduleIds = new Set(
+      graph.nodes
+        .filter((node) => node.labels.includes('Schedule') && String(node.properties.last_run_status || '') === 'rejected')
+        .map((node) => node.id),
+    );
+    const completedScheduleIds = new Set(
+      graph.nodes
+        .filter((node) => node.labels.includes('Schedule') && String(node.properties.last_run_status || '') === 'completed')
+        .map((node) => node.id),
+    );
+    const failedScheduleIds = new Set(
+      graph.nodes
+        .filter((node) => node.labels.includes('Schedule') && String(node.properties.last_run_status || '') === 'failed')
+        .map((node) => node.id),
+    );
+    const liveScheduleIds = new Set(
+      graph.nodes
+        .filter((node) => node.labels.includes('Schedule') && String(node.properties.mode || '') === 'live')
+        .map((node) => node.id),
+    );
+    const simulationScheduleIds = new Set(
+      graph.nodes
+        .filter((node) => node.labels.includes('Schedule') && String(node.properties.mode || '') === 'simulation')
+        .map((node) => node.id),
+    );
+    const pendingRunIds = new Set(
+      graph.edges
+        .filter((edge) => edge.type === 'DISPATCHED_RUN' && pendingScheduleIds.has(edge.source))
+        .map((edge) => edge.target),
+    );
+    const rejectedRunIds = new Set(
+      graph.edges
+        .filter((edge) => edge.type === 'DISPATCHED_RUN' && rejectedScheduleIds.has(edge.source))
+        .map((edge) => edge.target),
+    );
+    const completedRunIds = new Set(
+      graph.edges
+        .filter((edge) => edge.type === 'DISPATCHED_RUN' && completedScheduleIds.has(edge.source))
+        .map((edge) => edge.target),
+    );
+    const failedRunIds = new Set(
+      graph.edges
+        .filter((edge) => edge.type === 'DISPATCHED_RUN' && failedScheduleIds.has(edge.source))
+        .map((edge) => edge.target),
+    );
 
     const nodes = graph.nodes.filter((node) => {
       const labelText = node.labels.join(' ').toLowerCase();
       const propText = Object.values(node.properties).join(' ').toLowerCase();
       const matchesQuery = !q || labelText.includes(q) || propText.includes(q) || node.id.toLowerCase().includes(q);
       const matchesLabel = !useLabelFilter || node.labels.some((label) => activeLabels.includes(label));
-      return matchesQuery && matchesLabel;
+      let matchesShortcut = true;
+      if (activeShortcut === 'pending_approvals') {
+        matchesShortcut =
+          (node.labels.includes('Schedule') && pendingScheduleIds.has(node.id)) ||
+          (node.labels.includes('Run') && pendingRunIds.has(node.id));
+      } else if (activeShortcut === 'rejected_schedules') {
+        matchesShortcut =
+          (node.labels.includes('Schedule') && rejectedScheduleIds.has(node.id)) ||
+          (node.labels.includes('Run') && rejectedRunIds.has(node.id));
+      } else if (activeShortcut === 'completed_schedule_runs') {
+        matchesShortcut =
+          (node.labels.includes('Schedule') && completedScheduleIds.has(node.id)) ||
+          (node.labels.includes('Run') && completedRunIds.has(node.id));
+      } else if (activeShortcut === 'failed_schedule_runs') {
+        matchesShortcut =
+          (node.labels.includes('Schedule') && failedScheduleIds.has(node.id)) ||
+          (node.labels.includes('Run') && failedRunIds.has(node.id));
+      } else if (activeShortcut === 'live_schedules') {
+        matchesShortcut = node.labels.includes('Schedule') && liveScheduleIds.has(node.id);
+      } else if (activeShortcut === 'simulation_schedules') {
+        matchesShortcut = node.labels.includes('Schedule') && simulationScheduleIds.has(node.id);
+      }
+      return matchesQuery && matchesLabel && matchesShortcut;
     });
 
     const nodeIds = new Set(nodes.map((node) => node.id));
     const edges = graph.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
     return { nodes, edges };
-  }, [graph, query, activeLabels]);
+  }, [graph, query, activeLabels, activeShortcut]);
 
   const layout = useMemo(() => {
     const n = Math.max(visible.nodes.length, 1);
@@ -205,7 +279,13 @@ export function GraphPanel({ runId, threadId }: Props) {
   }, [layout, visible.edges]);
 
   const toggleLabel = (label: string) => {
+    setActiveShortcut('custom');
     setActiveLabels((prev) => (prev.includes(label) ? prev.filter((value) => value !== label) : [...prev, label]));
+  };
+
+  const applyShortcut = (shortcut: string, labels: string[]) => {
+    setActiveShortcut(shortcut);
+    setActiveLabels(labels);
   };
 
   const tooltip = hoveredNode
@@ -223,6 +303,114 @@ export function GraphPanel({ runId, threadId }: Props) {
       </div>
 
       <div className="filter-chips">
+        <button
+          type="button"
+          className={activeShortcut === 'all' && activeLabels.length === 0 ? 'chip active' : 'chip'}
+          onClick={() => {
+            setActiveShortcut('all');
+            setActiveLabels([]);
+          }}
+        >
+          All
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'artifacts' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('artifacts', ['DesktopArtifact'])}
+        >
+          Artifacts
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'artifact_lineage' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('artifact_lineage', ['DesktopArtifact', 'Episode'])}
+        >
+          Artifact Lineage
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'run_outputs' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('run_outputs', ['Run', 'DesktopArtifact'])}
+        >
+          Run Outputs
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'claims' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('claims', ['Claim'])}
+        >
+          Claims
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'tools' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('tools', ['ToolExecution'])}
+        >
+          Tools
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'episodes' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('episodes', ['Episode'])}
+        >
+          Memory Episodes
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'schedules' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('schedules', ['Schedule'])}
+        >
+          Schedules
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'schedule_runs' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('schedule_runs', ['Schedule', 'Run'])}
+        >
+          Schedule Runs
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'pending_approvals' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('pending_approvals', [])}
+        >
+          Pending Approvals
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'rejected_schedules' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('rejected_schedules', [])}
+        >
+          Rejected Schedules
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'completed_schedule_runs' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('completed_schedule_runs', [])}
+        >
+          Completed Schedule Runs
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'failed_schedule_runs' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('failed_schedule_runs', [])}
+        >
+          Failed Schedule Runs
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'live_schedules' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('live_schedules', [])}
+        >
+          Live Schedules
+        </button>
+        <button
+          type="button"
+          className={activeShortcut === 'simulation_schedules' ? 'chip active' : 'chip'}
+          onClick={() => applyShortcut('simulation_schedules', [])}
+        >
+          Simulation Schedules
+        </button>
         {availableLabels.map((label) => {
           const active = activeLabels.includes(label);
           return (

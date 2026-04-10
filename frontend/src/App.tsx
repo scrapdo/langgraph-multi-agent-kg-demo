@@ -1,30 +1,39 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { AgentStudio } from './components/AgentStudio';
+import { CapabilityDeckPanel } from './components/CapabilityDeckPanel';
+import { BrowserOpsPanel } from './components/BrowserOpsPanel';
 import { DesktopHistoryPanel } from './components/DesktopHistoryPanel';
 import { DesktopOpsPanel } from './components/DesktopOpsPanel';
-import { HeyGenPanel } from './components/HeyGenPanel';
+import { DesktopScheduleHistoryPanel } from './components/DesktopScheduleHistoryPanel';
+import { DocumentWorkbenchPanel } from './components/DocumentWorkbenchPanel';
 import { HealthPanel } from './components/HealthPanel';
 import { HuggingFacePanel } from './components/HuggingFacePanel';
 import { MemoryPanel } from './components/MemoryPanel';
+import { OperatorInboxPanel } from './components/OperatorInboxPanel';
+import { ReportWorkbenchPanel } from './components/ReportWorkbenchPanel';
 import { RunConsole } from './components/RunConsole';
+import { SecretaryPanel } from './components/SecretaryPanel';
 import { ShoppingBoard } from './components/ShoppingBoard';
 import { SocialOpsPanel } from './components/SocialOpsPanel';
+import { SchedulerAdminPanel, SchedulerPublicPage } from './components/SchedulerSuite';
 import { DEFAULT_THEME, THEMES, loadTheme, persistTheme, type ThemeId } from './lib/themes';
-import type { RunDetail } from './types';
+import type { DesktopSchedule, RunDetail } from './types';
 import './styles.css';
 
 const GraphPanel = lazy(() => import('./components/GraphPanel').then((module) => ({ default: module.GraphPanel })));
 
 type Workspace = 'control' | 'intelligence' | 'specialists' | 'studio';
 type IntelligenceView = 'graph' | 'memory';
-type StudioView = 'agents' | 'models' | 'avatar' | 'desktop' | 'history';
+type StudioView = 'agents' | 'models' | 'browser' | 'documents' | 'reports' | 'desktop' | 'history' | 'schedules';
 
 export default function App() {
+  const [hashRoute, setHashRoute] = useState(() => window.location.hash || '#/');
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<RunDetail | null>(null);
   const [workspace, setWorkspace] = useState<Workspace>('control');
   const [intelligenceView, setIntelligenceView] = useState<IntelligenceView>('graph');
   const [studioView, setStudioView] = useState<StudioView>('agents');
+  const [editingSchedule, setEditingSchedule] = useState<DesktopSchedule | null>(null);
   const [theme, setTheme] = useState<ThemeId>(() => {
     if (typeof window === 'undefined') return DEFAULT_THEME;
     return loadTheme(window.localStorage);
@@ -38,6 +47,21 @@ export default function App() {
     persistTheme(theme, window.localStorage);
     document.body.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    const onHashChange = () => setHashRoute(window.location.hash || '#/');
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  if (hashRoute.startsWith('#/book/')) {
+    const slug = hashRoute.replace('#/book/', '').split(/[/?]/)[0];
+    return <SchedulerPublicPage slug={slug} />;
+  }
+
+  if (hashRoute === '#/scheduler') {
+    return <SchedulerAdminPanel />;
+  }
 
   return (
     <main className={`app-shell theme-${theme}`}>
@@ -55,6 +79,7 @@ export default function App() {
             <p className="metric-label">Theme</p>
             <p className="metric-value">{activeTheme.label}</p>
           </div>
+          <a className="scheduler-launch-link" href="#/scheduler">Open scheduler</a>
           <label className="theme-switcher-select">
             <span className="sr-only">Theme selector</span>
             <select value={theme} onChange={(e) => setTheme(e.target.value as ThemeId)}>
@@ -147,15 +172,21 @@ export default function App() {
         </div>
 
         {workspace === 'control' && (
-          <section className="grid layout-main">
-            <RunConsole
-              onRunChange={(id, detail) => {
-                setRunId(id);
-                if (detail) setRun(detail);
-              }}
-            />
-            <HealthPanel run={run} />
-          </section>
+          <>
+            <section className="grid layout-main">
+              <RunConsole
+                onRunChange={(id, detail) => {
+                  setRunId(id);
+                  if (detail) setRun(detail);
+                }}
+              />
+              <HealthPanel run={run} />
+            </section>
+            <section className="grid layout-main">
+              <OperatorInboxPanel />
+            </section>
+            <CapabilityDeckPanel />
+          </>
         )}
 
         {workspace === 'intelligence' && (
@@ -190,6 +221,7 @@ export default function App() {
           <section className="grid layout-main">
             <ShoppingBoard runId={runId} run={run} />
             <SocialOpsPanel runId={runId} run={run} />
+            <SecretaryPanel />
           </section>
         )}
 
@@ -212,10 +244,24 @@ export default function App() {
               </button>
               <button
                 type="button"
-                className={studioView === 'avatar' ? 'workspace-tab active' : 'workspace-tab'}
-                onClick={() => setStudioView('avatar')}
+                className={studioView === 'browser' ? 'workspace-tab active' : 'workspace-tab'}
+                onClick={() => setStudioView('browser')}
               >
-                HeyGen
+                Browser
+              </button>
+              <button
+                type="button"
+                className={studioView === 'documents' ? 'workspace-tab active' : 'workspace-tab'}
+                onClick={() => setStudioView('documents')}
+              >
+                Documents
+              </button>
+              <button
+                type="button"
+                className={studioView === 'reports' ? 'workspace-tab active' : 'workspace-tab'}
+                onClick={() => setStudioView('reports')}
+              >
+                Reports
               </button>
               <button
                 type="button"
@@ -231,12 +277,29 @@ export default function App() {
               >
                 History
               </button>
+              <button
+                type="button"
+                className={studioView === 'schedules' ? 'workspace-tab active' : 'workspace-tab'}
+                onClick={() => setStudioView('schedules')}
+              >
+                Schedules
+              </button>
             </div>
             {studioView === 'agents' && <AgentStudio theme={theme} onThemeChange={setTheme} />}
             {studioView === 'models' && <HuggingFacePanel />}
-            {studioView === 'avatar' && <HeyGenPanel run={run} />}
-            {studioView === 'desktop' && <DesktopOpsPanel runId={runId} run={run} />}
+            {studioView === 'browser' && <BrowserOpsPanel />}
+            {studioView === 'documents' && <DocumentWorkbenchPanel />}
+            {studioView === 'reports' && <ReportWorkbenchPanel runId={runId} />}
+            {studioView === 'desktop' && <DesktopOpsPanel runId={runId} run={run} editingSchedule={editingSchedule} onLoadedSchedule={() => setEditingSchedule(null)} />}
             {studioView === 'history' && <DesktopHistoryPanel />}
+            {studioView === 'schedules' && (
+              <DesktopScheduleHistoryPanel
+                onEditSchedule={(schedule) => {
+                  setEditingSchedule(schedule);
+                  setStudioView('desktop');
+                }}
+              />
+            )}
           </>
         )}
       </section>

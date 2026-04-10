@@ -150,6 +150,14 @@ def available_catalog() -> dict[str, Any]:
                 "provider": "openrouter" if _provider_ready("openrouter") else "openai",
                 "model": "meta-llama/llama-3.3-70b-instruct" if _provider_ready("openrouter") else settings.openai_model,
             },
+            "secretary": {
+                "provider": "openai" if _provider_ready("openai") else "anthropic",
+                "model": settings.openai_model if _provider_ready("openai") else settings.anthropic_model,
+            },
+            "wellness": {
+                "provider": "anthropic" if _provider_ready("anthropic") else "openai",
+                "model": settings.anthropic_model if _provider_ready("anthropic") else settings.openai_model,
+            },
         },
     }
 

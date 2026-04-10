@@ -182,6 +182,14 @@ class DesktopAutomationService:
         for name, content in files.items():
             (directory / name).write_text(content)
 
+    def _resolve_output_dir(self, bucket: str, payload: dict[str, Any]) -> Path:
+        custom = str(payload.get("output_subdir") or "").strip().strip("/")
+        target = self.output_dir / bucket
+        if custom:
+            target = target / custom
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
     def execute(self, action_id: str) -> dict[str, Any]:
         with self._lock:
             self._ensure_loaded()
@@ -199,6 +207,8 @@ class DesktopAutomationService:
                 output = self._execute_gmail_calendar(action, payload)
             elif kind == "ai_influencer":
                 output = self._execute_ai_influencer(action, payload)
+            elif kind == "wellness_checkin":
+                output = self._execute_wellness_checkin(action, payload)
             else:
                 return self._update(action_id, status="failed", notes=["Unsupported desktop action kind"])
             method = self._execution_method(kind)
@@ -241,6 +251,8 @@ class DesktopAutomationService:
             return "local_package"
         if kind == "social_package":
             return "local_package"
+        if kind == "wellness_checkin":
+            return "local_package"
         return "unknown"
 
     def _host_bridge_headers(self) -> dict[str, str]:
@@ -253,8 +265,7 @@ class DesktopAutomationService:
         title = str(payload.get("title") or action.get("title") or "Writer Draft")
         content = str(payload.get("content") or "")
         slug = self._slug(title)
-        target_dir = self.output_dir / "writer"
-        target_dir.mkdir(parents=True, exist_ok=True)
+        target_dir = self._resolve_output_dir("writer", payload)
         md_path = target_dir / f"{slug}.md"
         rtf_path = target_dir / f"{slug}.rtf"
         md_path.write_text(content)
@@ -268,7 +279,7 @@ class DesktopAutomationService:
         message = str(payload.get("message") or "")
         notes = payload.get("notes") or []
         slug = self._slug(title)
-        directory = self.output_dir / "social" / slug
+        directory = self._resolve_output_dir("social", payload) / slug
         self._write_text_bundle(
             directory,
             {
@@ -284,7 +295,7 @@ class DesktopAutomationService:
         slug = self._slug(str(action.get("title") or "gmail-calendar"))
         action_type = str(payload.get("action_type") or "snapshot")
         if google_workspace_service.enabled():
-            return google_workspace_service.snapshot(prompt, self.output_dir, slug, action_type=action_type)
+            return google_workspace_service.snapshot(prompt, self._resolve_output_dir("gmail_calendar", payload), slug, action_type=action_type)
         if not settings.gmail_calendar_webhook_url:
             raise RuntimeError(
                 "Google Workspace is not configured. Add GOOGLE_WORKSPACE_ACCESS_TOKEN for direct Gmail/Calendar access or configure GMAIL_CALENDAR_WEBHOOK_URL for a connector fallback."
@@ -294,7 +305,7 @@ class DesktopAutomationService:
     def _execute_ai_influencer(self, action: dict[str, Any], payload: dict[str, Any]) -> Path | str:
         title = str(payload.get("title") or action.get("title") or "AI Influencer Package")
         slug = self._slug(title)
-        directory = self.output_dir / "ai_influencer" / slug
+        directory = self._resolve_output_dir("ai_influencer", payload) / slug
         brief = str(payload.get("brief") or "")
         self._write_text_bundle(
             directory,
@@ -306,6 +317,33 @@ class DesktopAutomationService:
         self._try_host_bridge_open_ai_influencer(str(directory))
         if settings.ai_influencer_webhook_url:
             self._execute_webhook_action(settings.ai_influencer_webhook_url, settings.ai_influencer_bearer_token, payload)
+        return directory
+
+    def _execute_wellness_checkin(self, action: dict[str, Any], payload: dict[str, Any]) -> Path:
+        title = str(payload.get("title") or action.get("title") or "Wellness Check-in")
+        slug = self._slug(title)
+        directory = self._resolve_output_dir("wellness", payload) / slug
+        message = str(payload.get("message") or "")
+        goals = [str(item).strip() for item in (payload.get("goals") or []) if str(item).strip()]
+        self._write_text_bundle(
+            directory,
+            {
+                "checkin.md": "\n".join(
+                    [
+                        "# Wellness Check-in",
+                        "",
+                        f"Title: {title}",
+                        "",
+                        "## Message",
+                        message or "No message provided.",
+                        "",
+                        "## Goals",
+                        *([f"- {goal}" for goal in goals] or ["- No goals supplied."]),
+                    ]
+                ),
+                "manifest.json": json.dumps(payload, indent=2),
+            },
+        )
         return directory
 
     def try_open_in_word(self, path: str) -> dict[str, Any]:

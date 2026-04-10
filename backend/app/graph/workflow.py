@@ -8,6 +8,7 @@ from app.agents.nodes import (
     critic_node,
     degraded_handler_node,
     researcher_node,
+    should_coordinator_route,
     should_critic_route,
     should_research_continue,
     writer_node,
@@ -42,7 +43,15 @@ def build_graph():
     graph.add_node("degraded", degraded_handler_node)
 
     graph.set_entry_point("coordinator")
-    graph.add_edge("coordinator", "researcher")
+    graph.add_conditional_edges(
+        "coordinator",
+        should_coordinator_route,
+        {
+            "researcher": "researcher",
+            "writer": "writer",
+            "degraded": "degraded",
+        },
+    )
 
     graph.add_conditional_edges(
         "researcher",

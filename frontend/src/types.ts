@@ -114,8 +114,7 @@ export interface AgentProfile {
   speech_style: string;
   speech_persona: string;
   premium_voice_id: string;
-  heygen_avatar_id: string;
-  heygen_voice_id: string;
+  ready: boolean;
   app_execution_mode: 'disabled' | 'approval' | 'auto';
   specialist_apps: string[];
 }
@@ -134,28 +133,6 @@ export interface ProviderDefinition {
 export interface ProvidersCatalog {
   providers: ProviderDefinition[];
   recommended_by_function: Record<string, { provider: string; model: string }>;
-}
-
-export interface HeyGenAvatar {
-  avatar_id?: string;
-  id?: string;
-  avatar_name?: string;
-  name?: string;
-  preview_image_url?: string;
-}
-
-export interface HeyGenVoice {
-  voice_id?: string;
-  id?: string;
-  name?: string;
-  language?: string;
-  gender?: string;
-}
-
-export interface HeyGenAssetsResponse {
-  enabled: boolean;
-  avatars: HeyGenAvatar[];
-  voices: HeyGenVoice[];
 }
 
 export interface HuggingFaceRepoResult {
@@ -239,9 +216,129 @@ export interface LocalAppDefinition {
   notes?: string | null;
 }
 
+export interface SecretaryDispatchRequest {
+  channel: 'auto' | 'call' | 'sms' | 'email' | 'telegram';
+  to: string;
+  subject?: string;
+  message: string;
+  mode: RunMode;
+  provider?: 'auto' | 'twilio' | 'telnyx' | 'sendgrid' | 'telegram';
+  contact_id?: string;
+}
+
+export interface SecretaryContactPreference {
+  contact_id: string;
+  name: string;
+  preferred_channel: 'call' | 'sms' | 'email' | 'telegram';
+  preferred_provider: 'auto' | 'twilio' | 'telnyx' | 'sendgrid' | 'telegram';
+  phone_number?: string;
+  email?: string;
+  telegram_chat_id?: string;
+  notes?: string;
+  relationship?: string;
+  organization?: string;
+  timezone?: string;
+  preferred_contact_window?: string;
+  channel_priority?: Array<'call' | 'sms' | 'email' | 'telegram'>;
+  wellness_opt_in?: boolean;
+  last_contact_at?: string;
+  last_contact_channel?: string;
+}
+
+export interface OperatorInboxItem {
+  item_id: string;
+  kind: string;
+  title: string;
+  summary: string;
+  status: string;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  source: string;
+  agent_id?: string | null;
+  run_id?: string | null;
+  schedule_id?: string | null;
+  action_id?: string | null;
+  created_at?: string | null;
+  metadata: Record<string, unknown>;
+}
+
+export interface OperatorInboxResponse {
+  summary: Record<string, number>;
+  items: OperatorInboxItem[];
+}
+
+export interface DocumentProcessResponse {
+  name: string;
+  content_type: string;
+  size_bytes: number;
+  extracted_text: string;
+  summary: string;
+  sections: string[];
+  warnings: string[];
+}
+
+export interface BrowserInspectionResult {
+  url: string;
+  status_code?: number;
+  title?: string;
+  description?: string;
+  h1?: string;
+  link_count?: number;
+  content_type?: string;
+  error?: string;
+}
+
+export interface BrowserWorkflow {
+  workflow_id: string;
+  name: string;
+  agent_id: string;
+  mode: RunMode;
+  start_url: string;
+  urls: string[];
+  goal: string;
+  notes: string[];
+  last_run_at?: string;
+  last_status?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlaywrightScript {
+  script_id: string;
+  name: string;
+  agent_id: string;
+  start_url: string;
+  steps: Array<Record<string, unknown>>;
+  mode?: RunMode;
+  approval_required?: boolean;
+  notes: string[];
+  last_run_at?: string;
+  last_status?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlaywrightScriptPreset {
+  preset_id: string;
+  name: string;
+  agent_id: string;
+  description: string;
+  start_url: string;
+  mode: RunMode;
+  approval_required: boolean;
+  steps: Array<Record<string, unknown>>;
+}
+
+export interface BrowserStepDraft {
+  action: 'wait' | 'click' | 'fill' | 'extract_text';
+  label: string;
+  selector?: string;
+  value?: string;
+  timeout_ms?: number;
+}
+
 export interface DesktopAction {
   action_id: string;
-  kind: 'writer_doc' | 'social_package' | 'gmail_calendar' | 'ai_influencer';
+  kind: 'writer_doc' | 'social_package' | 'gmail_calendar' | 'ai_influencer' | 'wellness_checkin';
   agent_id: string;
   status: 'queued' | 'completed' | 'blocked' | 'failed';
   title: string;
@@ -262,9 +359,118 @@ export interface DesktopSchedule {
   workflow_kind: string;
   agent_id: string;
   enabled: boolean;
+  mode: 'simulation' | 'live';
+  approval_required: boolean;
+  output_preset?: string;
+  output_subdir?: string;
+  template_preset?: string;
+  prompt_template?: string;
+  content_template?: string;
   cadence_label: string;
   rrule: string;
   notes: string[];
+  last_run_at?: string;
+  last_run_id?: string;
+  last_action_id?: string;
+  last_run_status?: string;
+  last_error?: string;
+  success_count?: number;
+  failure_count?: number;
+  next_run_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface DesktopSchedulePreset {
+  id: string;
+  label: string;
+  subdir?: string;
+  prompt_template?: string;
+  content_template?: string;
+}
+
+export interface SchedulerAvailabilityWindow {
+  weekday: number;
+  start: string;
+  end: string;
+}
+
+export interface SchedulerEventType {
+  event_type_id: string;
+  name: string;
+  slug: string;
+  description: string;
+  duration_minutes: number;
+  buffer_before_minutes: number;
+  buffer_after_minutes: number;
+  minimum_notice_hours: number;
+  booking_window_days: number;
+  max_bookings_per_day: number;
+  is_active: boolean;
+}
+
+export interface SchedulerProfile {
+  owner_name: string;
+  public_slug: string;
+  headline: string;
+  bio: string;
+  timezone: string;
+  location_type: string;
+  location_value: string;
+  booking_window_days: number;
+  minimum_notice_hours: number;
+  max_bookings_per_day: number;
+  availability: SchedulerAvailabilityWindow[];
+  blackout_dates: string[];
+  event_types: SchedulerEventType[];
+}
+
+export interface SchedulerPublicProfile {
+  owner_name: string;
+  public_slug: string;
+  headline: string;
+  bio: string;
+  timezone: string;
+  location_type: string;
+  location_value: string;
+  event_types: SchedulerEventType[];
+}
+
+export interface SchedulerAvailabilitySlot {
+  start_at: string;
+  end_at: string;
+  label: string;
+}
+
+export interface SchedulerAvailabilityResponse {
+  date: string;
+  timezone: string;
+  event_type: SchedulerEventType;
+  slots: SchedulerAvailabilitySlot[];
+}
+
+export interface SchedulerBooking {
+  booking_id: string;
+  public_slug: string;
+  event_type_id: string;
+  event_type_slug: string;
+  event_type_name: string;
+  duration_minutes: number;
+  status: string;
+  name: string;
+  email: string;
+  notes: string;
+  location_type: string;
+  location_value: string;
+  timezone: string;
+  start_at: string;
+  end_at: string;
+  created_at: string;
+  confirmation_code: string;
+}
+
+export interface SchedulerDashboardResponse {
+  profile: SchedulerProfile;
+  bookings: SchedulerBooking[];
+  metrics: Record<string, number>;
 }

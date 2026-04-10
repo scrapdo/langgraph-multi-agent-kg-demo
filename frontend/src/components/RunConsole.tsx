@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { getAgentProfiles, getRun, getRunSpeech, startRun, streamEvents } from '../api/client';
+import { getAgentProfiles, getHealth, getRun, getRunSpeech, startRun, streamEvents, testTts } from '../api/client';
 import {
   DEFAULT_MISSION_TEMPLATES,
   MISSION_TEMPLATE_STORAGE_KEY,
@@ -20,8 +20,8 @@ import type { AgentProfile, RunDetail, RunMode } from '../types';
 
 type TranscriptRole = 'user' | 'brain' | 'system';
 type VoiceProfile = 'natural' | 'warm' | 'energetic' | 'precise' | 'cinematic';
-type VoiceEngine = 'openai' | 'elevenlabs' | 'parler' | 'browser';
-type NeuralVoice = 'alloy' | 'verse' | 'aria' | 'ash' | 'sage';
+type VoiceEngine = 'elevenlabs' | 'openai' | 'parler' | 'browser';
+type NeuralVoice = 'alloy' | 'ash' | 'coral' | 'sage' | 'shimmer' | 'verse';
 
 interface TranscriptEntry {
   id: string;
@@ -45,6 +45,12 @@ interface NarrationItem {
 interface Props {
   onRunChange: (runId: string | null, run: RunDetail | null) => void;
 }
+
+const CONSERVATIVE_ROUTING_STORAGE_KEY = 'kg-demo-conservative-routing';
+const AUTO_SILENCE_RUN_MS = 1500;
+const SPEECH_ECHO_GUARD_MS = 1200;
+const SPEECH_RESUME_DELAY_MS = 320;
+const FOLLOW_UP_REPLY_WINDOW_MS = 6500;
 
 function useSpeechRecognition() {
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -74,6 +80,11 @@ function pickVoice(voices: SpeechSynthesisVoice[]) {
     voices.find((v) => /en-US/i.test(v.lang)) ??
     voices[0]
   );
+}
+
+function isVisualAvatar(value: string) {
+  const trimmed = value.trim();
+  return /^https?:\/\//i.test(trimmed) || trimmed.startsWith('data:image/');
 }
 
 function browserStyleSettings(style: VoiceProfile) {
@@ -116,6 +127,139 @@ function buildNarrationItem(node: string, status: string, detail: string) {
     return { node, text: `${node} completed.` };
   }
   return null;
+}
+
+function detectPredictedRoute(
+  task: string,
+  agentProfiles: Record<string, AgentProfile>,
+  conservativeSpecialistRouting: boolean,
+) {
+  const text = task.trim().toLowerCase();
+  if (!text) return { agentId: 'coordinator', label: 'Coordinator' };
+
+  const aliasesByAgent: Record<string, string[]> = {
+    coordinator: ['coordinator'],
+    researcher: ['researcher'],
+    critic: ['critic'],
+    writer: ['writer'],
+    shopper: ['shopper', 'private shopper'],
+    social: ['social', 'social manager'],
+    secretary: ['secretary', 'assistant'],
+    wellness: ['wellness', 'wellness coach', 'coach'],
+  };
+
+  for (const [agentId, profile] of Object.entries(agentProfiles)) {
+    const aliases = [
+      agentId,
+      (profile.name || '').toLowerCase(),
+      ...(aliasesByAgent[agentId] || []),
+    ]
+      .flatMap((value) => value.split(/[\s_/:-]+/).length > 1 ? [value, ...value.split(/[\s_/:-]+/)] : [value])
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => value.length >= 3);
+    for (const alias of aliases) {
+      if (new RegExp(`\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)) {
+        return { agentId, label: profile.name || agentId };
+      }
+    }
+  }
+
+  const capabilityTriggers = [
+    'capabilities',
+    'what can you do',
+    'who are you',
+    'tell me about yourself',
+    'introduce yourself',
+  ];
+  if (capabilityTriggers.some((trigger) => text.includes(trigger))) {
+    return { agentId: 'coordinator', label: 'Coordinator' };
+  }
+
+  const strongSpecialistTriggers: Array<{ agentId: string; triggers: string[] }> = [
+    { agentId: 'shopper', triggers: ['where can i buy', 'best deal', 'hard to find', 'in stock', 'source this item'] },
+    { agentId: 'social', triggers: ['social media plan', 'content calendar', 'posting schedule', 'linkedin post', 'instagram caption', 'tweet thread'] },
+    { agentId: 'secretary', triggers: ['book appointment', 'schedule appointment', 'make a call', 'place a call', 'send a text', 'send email', 'follow up with'] },
+    { agentId: 'wellness', triggers: ['wellness coach', 'habit plan', 'workout plan', 'sleep routine', 'motivation', 'accountability', 'healthy routine'] },
+  ];
+
+  for (const item of strongSpecialistTriggers) {
+    if (item.triggers.some((trigger) => text.includes(trigger))) {
+      const profile = agentProfiles[item.agentId];
+      return { agentId: item.agentId, label: profile?.name || item.agentId };
+    }
+  }
+
+  if (!conservativeSpecialistRouting) {
+    if (['find me', 'deal on', 'private shopper'].some((trigger) => text.includes(trigger))) {
+      return { agentId: 'shopper', label: agentProfiles.shopper?.name || 'Private Shopper' };
+    }
+    if (['social media', 'instagram', 'linkedin', 'tweet', 'content plan'].some((trigger) => text.includes(trigger))) {
+      return { agentId: 'social', label: agentProfiles.social?.name || 'Social Manager' };
+    }
+    if (['wellness', 'habit', 'fitness', 'workout', 'sleep', 'stress'].some((trigger) => text.includes(trigger))) {
+      return { agentId: 'wellness', label: agentProfiles.wellness?.name || 'Wellness Coach' };
+    }
+  }
+
+  return { agentId: 'coordinator', label: agentProfiles.coordinator?.name || 'Coordinator' };
+}
+
+function looksLikeFollowUpQuestion(text: string) {
+  const clean = normalizeSpeechText(text).trim();
+  if (!clean) return false;
+  const parts = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const tail = parts.at(-1) ?? clean;
+  return /\?\s*$/.test(tail);
+}
+
+function isDismissalReply(text: string) {
+  const normalized = normalizeSpeechText(text).trim().toLowerCase();
+  if (!normalized) return false;
+  return [
+    /^no(?:\s+thanks)?[.!]*$/,
+    /^nope[.!]*$/,
+    /^i'?m good[.!]*$/,
+    /^we'?re good[.!]*$/,
+    /^that'?s all[.!]*$/,
+    /^that is all[.!]*$/,
+    /^nothing else[.!]*$/,
+    /^i do(?:\s+not|n't)\s+need anything else[.!]*$/,
+    /^don'?t need anything else[.!]*$/,
+    /^all set[.!]*$/,
+    /^bye[.!]*$/,
+    /^goodbye[.!]*$/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  const node = target as HTMLElement | null;
+  if (!node) return false;
+  const tagName = node.tagName;
+  return node.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(tagName);
+}
+
+function contextualParting(agentId: string, agentProfiles: Record<string, AgentProfile>) {
+  const name = agentProfiles[agentId]?.name || agentId;
+  switch (agentId) {
+    case 'secretary':
+      return `${name} will stay ready if you want me to line anything else up.`;
+    case 'wellness':
+      return `${name} is here when you want to pick this back up. Stay steady.`;
+    case 'shopper':
+      return `${name} will stay on standby if you want another option or a better price.`;
+    case 'social':
+      return `${name} can pick this up again whenever you want the next draft or posting move.`;
+    case 'researcher':
+      return `${name} will be here when you want the next pass on the research.`;
+    case 'writer':
+      return `${name} can keep going whenever you want the next version.`;
+    case 'critic':
+      return `${name} can review the next round whenever you want.`;
+    case 'coding':
+      return `${name} is ready when you want the next implementation step.`;
+    default:
+      return `${name} will be here when you need anything else.`;
+  }
 }
 
 function NeuralWave({
@@ -332,10 +476,11 @@ export function RunConsole({ onRunChange }: Props) {
   const [speechSupported, setSpeechSupported] = useState(true);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [autoSilenceRun, setAutoSilenceRun] = useState(true);
+  const [conservativeSpecialistRouting, setConservativeSpecialistRouting] = useState(true);
   const [speakingLevel, setSpeakingLevel] = useState(0);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
   const [voiceProfile, setVoiceProfile] = useState<VoiceProfile>('natural');
-  const [voiceEngine, setVoiceEngine] = useState<VoiceEngine>('openai');
+  const [voiceEngine, setVoiceEngine] = useState<VoiceEngine>('elevenlabs');
   const [neuralVoice, setNeuralVoice] = useState<NeuralVoice>('verse');
   const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('hal');
   const [savedTemplates, setSavedTemplates] = useState<MissionTemplate[]>([]);
@@ -345,6 +490,8 @@ export function RunConsole({ onRunChange }: Props) {
   const [streamPreviewSpeech, setStreamPreviewSpeech] = useState(true);
   const [speechBands, setSpeechBands] = useState<number[]>(Array.from({ length: 16 }, () => 0));
   const [speechMotion, setSpeechMotion] = useState(0);
+  const [voiceProviderState, setVoiceProviderState] = useState<Record<string, string>>({});
+  const [pendingRemotePlayback, setPendingRemotePlayback] = useState<{ agentId: string; text: string } | null>(null);
 
   const recognitionRef = useSpeechRecognition();
   const streamRef = useRef<EventSource | null>(null);
@@ -358,6 +505,8 @@ export function RunConsole({ onRunChange }: Props) {
   const lastUtteranceRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
   const lastAssistantSpeechRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioUnlockRef = useRef<HTMLAudioElement | null>(null);
+  const audioUnlockedRef = useRef(false);
   const audioObjectUrlRef = useRef<string | null>(null);
   const pulseTimerRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -365,6 +514,7 @@ export function RunConsole({ onRunChange }: Props) {
   const analyserDataRef = useRef<Uint8Array | null>(null);
   const waveformDataRef = useRef<Uint8Array | null>(null);
   const analyserFrameRef = useRef<number | null>(null);
+  const remotePulseFrameRef = useRef<number | null>(null);
   const browserSpeechPulseRef = useRef(0);
   const browserSpeechDecayRef = useRef<number | null>(null);
   const remoteSpeechPendingRef = useRef(false);
@@ -372,6 +522,13 @@ export function RunConsole({ onRunChange }: Props) {
   const narrationActiveRef = useRef(false);
   const userVoiceOverrideRef = useRef(false);
   const previewStateRef = useRef<{ runId: string | null; count: number }>({ runId: null, count: 0 });
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const micAnalyserRef = useRef<AnalyserNode | null>(null);
+  const micContextRef = useRef<AudioContext | null>(null);
+  const micFrameRef = useRef<number | null>(null);
+  const followUpTimeoutRef = useRef<number | null>(null);
+  const followUpAwaitingRef = useRef<{ agentId: string } | null>(null);
+  const [activeAgentId, setActiveAgentId] = useState<string>('coordinator');
 
   const runStateLabel = useMemo(() => {
     if (brainState === 'listening') return 'Listening';
@@ -380,9 +537,127 @@ export function RunConsole({ onRunChange }: Props) {
     return 'Idle';
   }, [brainState]);
 
+  const predictedRoute = useMemo(
+    () => detectPredictedRoute(task, agentProfiles, conservativeSpecialistRouting),
+    [task, agentProfiles, conservativeSpecialistRouting],
+  );
+
+  const activateSpeaker = (agentId: string) => {
+    if (agentId) setActiveAgentId(agentId);
+  };
+
+  const resolveAgentSpeechOptions = (agentId: string) => {
+    const profile = agentProfiles[agentId] ?? agentProfiles.writer ?? agentProfiles.coordinator;
+    return {
+      agentId,
+      voice: (profile?.speech_voice as NeuralVoice | undefined) ?? neuralVoice,
+      profile: (profile?.speech_style as VoiceProfile | undefined) ?? voiceProfile,
+      persona: profile?.speech_persona,
+      premiumVoiceId: profile?.premium_voice_id,
+    };
+  };
+
+  const clearFollowUpState = () => {
+    if (followUpTimeoutRef.current) {
+      window.clearTimeout(followUpTimeoutRef.current);
+      followUpTimeoutRef.current = null;
+    }
+    followUpAwaitingRef.current = null;
+  };
+
+  const speakContextualParting = (agentId: string) => {
+    const speech = resolveAgentSpeechOptions(agentId);
+    const text = contextualParting(agentId, agentProfiles);
+    void speak(text, undefined, {
+      agentId: speech.agentId,
+      voice: speech.voice,
+      profile: speech.profile,
+      persona: speech.persona,
+      premiumVoiceId: speech.premiumVoiceId,
+      autoListenAfterQuestion: false,
+    });
+  };
+
+  const armFollowUpTimeout = (agentId: string) => {
+    if (followUpTimeoutRef.current) {
+      window.clearTimeout(followUpTimeoutRef.current);
+    }
+    followUpAwaitingRef.current = { agentId };
+    followUpTimeoutRef.current = window.setTimeout(() => {
+      if (!followUpAwaitingRef.current || speakingRef.current || runInFlightRef.current) return;
+      const rec = recognitionRef.current;
+      clearFollowUpState();
+      setInterimText('');
+      if (rec && isListening) {
+        try {
+          rec.stop();
+        } catch {
+          // no-op
+        }
+      }
+      speakContextualParting(agentId);
+    }, FOLLOW_UP_REPLY_WINDOW_MS);
+  };
+
+  const unlockAudioPlayback = async () => {
+    if (audioUnlockedRef.current) return true;
+    try {
+      const audio = audioUnlockRef.current ?? new Audio();
+      audioUnlockRef.current = audio;
+      audio.preload = 'auto';
+      audio.playsInline = true;
+      audio.muted = true;
+
+      const sampleRate = 8000;
+      const sampleCount = 800;
+      const buffer = new ArrayBuffer(44 + sampleCount * 2);
+      const view = new DataView(buffer);
+      const writeString = (offset: number, value: string) => {
+        for (let i = 0; i < value.length; i += 1) {
+          view.setUint8(offset + i, value.charCodeAt(i));
+        }
+      };
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + sampleCount * 2, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(36, 'data');
+      view.setUint32(40, sampleCount * 2, true);
+      const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+
+      audio.src = url;
+      await audio.play();
+      audio.pause();
+      audio.currentTime = 0;
+      audio.removeAttribute('src');
+      audio.load();
+      audio.muted = false;
+      URL.revokeObjectURL(url);
+      audioUnlockedRef.current = true;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   useEffect(() => {
     setSavedTemplates(loadJsonArray<MissionTemplate>(window.localStorage, MISSION_TEMPLATE_STORAGE_KEY));
+    const conservativeSetting = window.localStorage.getItem(CONSERVATIVE_ROUTING_STORAGE_KEY);
+    if (conservativeSetting === 'false') {
+      setConservativeSpecialistRouting(false);
+    }
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(CONSERVATIVE_ROUTING_STORAGE_KEY, String(conservativeSpecialistRouting));
+  }, [conservativeSpecialistRouting]);
 
   useEffect(() => {
     const loadProfiles = async () => {
@@ -399,6 +674,30 @@ export function RunConsole({ onRunChange }: Props) {
       }
     };
     void loadProfiles();
+  }, []);
+
+  useEffect(() => {
+    const loadHealth = async () => {
+      try {
+        const response = await getHealth();
+        setVoiceProviderState((response.dependencies as Record<string, string> | undefined) ?? {});
+      } catch {
+        setVoiceProviderState({});
+      }
+    };
+    void loadHealth();
+  }, []);
+
+  useEffect(() => {
+    const prime = () => {
+      void unlockAudioPlayback();
+    };
+    window.addEventListener('pointerdown', prime, { passive: true });
+    window.addEventListener('keydown', prime);
+    return () => {
+      window.removeEventListener('pointerdown', prime);
+      window.removeEventListener('keydown', prime);
+    };
   }, []);
 
   useEffect(() => {
@@ -422,11 +721,6 @@ export function RunConsole({ onRunChange }: Props) {
       pulseTimerRef.current = null;
     }
 
-    if (brainState !== 'speaking' && brainState !== 'listening') {
-      setSpeechMotion(0);
-      return;
-    }
-
     pulseTimerRef.current = window.setInterval(() => {
       const t = Date.now() / 180;
       if (brainState === 'speaking') {
@@ -442,13 +736,29 @@ export function RunConsole({ onRunChange }: Props) {
             ),
           ),
         );
-      } else {
+      } else if (brainState === 'listening') {
         const level = fallbackSpeakingLevel(brainState, interimText.length, Date.now());
         setSpeakingLevel(level);
         setSpeechMotion(level * 0.6);
         setSpeechBands((prev) =>
           prev.map((_, index) => Math.max(0, Math.min(0.8, level * (0.55 + Math.sin(Date.now() / 180 + index) * 0.18)))),
         );
+      } else if (brainState === 'thinking') {
+        const thoughtLevel = 0.12 + Math.abs(Math.sin(t * 0.55)) * 0.08;
+        setSpeakingLevel((prev) => Math.max(prev * 0.9, thoughtLevel));
+        setSpeechMotion((prev) => Math.max(prev * 0.88, thoughtLevel * 0.8));
+        setSpeechBands((prev) =>
+          prev.map((band, index) =>
+            Math.max(
+              band * 0.86,
+              Math.min(0.38, thoughtLevel * (0.42 + Math.abs(Math.sin(t + index * 0.55)) * 0.4)),
+            ),
+          ),
+        );
+      } else {
+        setSpeakingLevel((prev) => (prev < 0.01 ? 0 : prev * 0.84));
+        setSpeechMotion((prev) => (prev < 0.01 ? 0 : prev * 0.82));
+        setSpeechBands((prev) => prev.map((band) => (band < 0.01 ? 0 : band * 0.8)));
       }
     }, 70);
 
@@ -470,6 +780,8 @@ export function RunConsole({ onRunChange }: Props) {
 
     rec.onstart = () => {
       setIsListening(true);
+      activateSpeaker('coordinator');
+      void startMicAnalysis().catch(() => undefined);
       if (window.speechSynthesis.speaking && Date.now() > recognitionSuspendUntilRef.current) {
         window.speechSynthesis.cancel();
         narrationQueueRef.current = [];
@@ -492,9 +804,9 @@ export function RunConsole({ onRunChange }: Props) {
 
     rec.onend = () => {
       setIsListening(false);
+      stopMicAnalysis();
       if (!runInFlightRef.current && !speakingRef.current) {
         setBrainState('idle');
-        setSpeakingLevel(0);
       }
     };
 
@@ -513,6 +825,9 @@ export function RunConsole({ onRunChange }: Props) {
 
       setInterimText(interim);
       setSpeakingLevel(Math.min(1, interim.length / 64));
+      if (interim.trim() && followUpAwaitingRef.current) {
+        armFollowUpTimeout(followUpAwaitingRef.current.agentId);
+      }
 
       if (finalText.trim()) {
         const clean = finalText.trim();
@@ -526,6 +841,7 @@ export function RunConsole({ onRunChange }: Props) {
 
         lastUtteranceRef.current = { text: clean, at: now };
         setTask(clean);
+        activateSpeaker('coordinator');
         setTranscript((prev) => [
           {
             id: crypto.randomUUID(),
@@ -536,22 +852,44 @@ export function RunConsole({ onRunChange }: Props) {
           ...prev,
         ].slice(0, 40));
 
-        if (autoSilenceRun && !runInFlightRef.current && !speakingRef.current) {
+        const followUpAgentId = followUpAwaitingRef.current?.agentId;
+        if (followUpAgentId && isDismissalReply(clean)) {
+          clearFollowUpState();
+          setTask('');
+          setInterimText('');
+          if (silenceTimerRef.current) {
+            window.clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+          }
+          try {
+            rec.stop();
+          } catch {
+            // no-op
+          }
+          speakContextualParting(followUpAgentId);
+          return;
+        }
+
+        if (followUpAgentId) {
+          clearFollowUpState();
+        }
+
+        if ((autoSilenceRun || Boolean(followUpAgentId)) && !runInFlightRef.current && !speakingRef.current) {
           if (silenceTimerRef.current) window.clearTimeout(silenceTimerRef.current);
           silenceTimerRef.current = window.setTimeout(() => {
             if (!runInFlightRef.current && !speakingRef.current && clean) {
               void launchRun(clean);
             }
-          }, 3000);
+          }, AUTO_SILENCE_RUN_MS);
         }
       }
     };
 
     rec.onerror = () => {
       setIsListening(false);
+      stopMicAnalysis();
       if (!runInFlightRef.current && !speakingRef.current) {
         setBrainState('idle');
-        setSpeakingLevel(0);
       }
     };
   }, [recognitionRef, autoSilenceRun]);
@@ -561,11 +899,16 @@ export function RunConsole({ onRunChange }: Props) {
       streamRef.current?.close();
       if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current);
       if (silenceTimerRef.current) window.clearTimeout(silenceTimerRef.current);
+      if (followUpTimeoutRef.current) window.clearTimeout(followUpTimeoutRef.current);
       if (pulseTimerRef.current) window.clearInterval(pulseTimerRef.current);
       window.speechSynthesis.cancel();
       if (audioRef.current) {
         audioRef.current.pause();
         audioRef.current = null;
+      }
+      if (audioUnlockRef.current) {
+        audioUnlockRef.current.pause();
+        audioUnlockRef.current = null;
       }
       if (analyserFrameRef.current) {
         cancelAnimationFrame(analyserFrameRef.current);
@@ -585,6 +928,8 @@ export function RunConsole({ onRunChange }: Props) {
         cancelAnimationFrame(browserSpeechDecayRef.current);
         browserSpeechDecayRef.current = null;
       }
+      stopRemotePlaybackPulse();
+      stopMicAnalysis();
     };
   }, []);
 
@@ -603,12 +948,112 @@ export function RunConsole({ onRunChange }: Props) {
     }
   };
 
+  const stopRemotePlaybackPulse = () => {
+    if (remotePulseFrameRef.current) {
+      cancelAnimationFrame(remotePulseFrameRef.current);
+      remotePulseFrameRef.current = null;
+    }
+  };
+
+  const startRemotePlaybackPulse = (audio: HTMLAudioElement) => {
+    stopRemotePlaybackPulse();
+    const tick = () => {
+      if (audio.paused || audio.ended) {
+        remotePulseFrameRef.current = null;
+        return;
+      }
+      const t = audio.currentTime || performance.now() / 1000;
+      const base = 0.46 + Math.abs(Math.sin(t * 7.2)) * 0.26;
+      const motion = 0.38 + Math.abs(Math.sin(t * 11.4 + 0.6)) * 0.34;
+      setSpeakingLevel((prev) => Math.max(prev * 0.76, base));
+      setSpeechMotion((prev) => Math.max(prev * 0.8, motion));
+      setSpeechBands((prev) =>
+        prev.map((band, index) => {
+          const next = base * (0.52 + Math.abs(Math.sin(t * (3.6 + index * 0.11) + index * 0.55)) * 0.55);
+          return Math.max(band * 0.78, Math.min(1, next));
+        }),
+      );
+      remotePulseFrameRef.current = requestAnimationFrame(tick);
+    };
+    remotePulseFrameRef.current = requestAnimationFrame(tick);
+  };
+
+  const stopMicAnalysis = () => {
+    if (micFrameRef.current) {
+      cancelAnimationFrame(micFrameRef.current);
+      micFrameRef.current = null;
+    }
+    micAnalyserRef.current?.disconnect();
+    micAnalyserRef.current = null;
+    if (micContextRef.current) {
+      void micContextRef.current.close().catch(() => undefined);
+      micContextRef.current = null;
+    }
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
+  };
+
+  const startMicAnalysis = async () => {
+    stopMicAnalysis();
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const context = new AudioCtx();
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.78;
+    source.connect(analyser);
+    micStreamRef.current = stream;
+    micContextRef.current = context;
+    micAnalyserRef.current = analyser;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const waveform = new Uint8Array(analyser.fftSize);
+    const tick = () => {
+      const node = micAnalyserRef.current;
+      if (!node) return;
+      node.getByteFrequencyData(data);
+      node.getByteTimeDomainData(waveform);
+      const avg = data.reduce((sum, value) => sum + value, 0) / (data.length || 1);
+      const rms =
+        Math.sqrt(
+          waveform.reduce((sum, value) => {
+            const centered = (value - 128) / 128;
+            return sum + centered * centered;
+          }, 0) / (waveform.length || 1),
+        ) || 0;
+      const groups = 16;
+      const bandSize = Math.max(1, Math.floor(data.length / groups));
+      const nextBands = Array.from({ length: groups }, (_, groupIndex) => {
+        const start = groupIndex * bandSize;
+        const end = Math.min(data.length, start + bandSize);
+        let sum = 0;
+        for (let i = start; i < end; i += 1) sum += data[i];
+        return Math.min(1, (sum / Math.max(1, end - start)) / 180);
+      });
+      setSpeechBands((prev) => nextBands.map((band, index) => (prev[index] ?? 0) * 0.34 + band * 0.66));
+      setSpeakingLevel(Math.min(1, avg / 125 + rms * 1.9));
+      setSpeechMotion(Math.min(1, rms * 2.2 + avg / 220));
+      micFrameRef.current = requestAnimationFrame(tick);
+    };
+    micFrameRef.current = requestAnimationFrame(tick);
+  };
+
   const attachAudioAnalysis = async (audio: HTMLAudioElement) => {
     stopAudioAnalysis();
     const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtx) return;
 
     const context = new AudioCtx();
+    if (context.state === 'suspended') {
+      await context.resume().catch(() => undefined);
+    }
+    if (context.state !== 'running') {
+      await context.close().catch(() => undefined);
+      return;
+    }
+
     const source = context.createMediaElementSource(audio);
     const analyser = context.createAnalyser();
     analyser.fftSize = 256;
@@ -620,10 +1065,6 @@ export function RunConsole({ onRunChange }: Props) {
     analyserRef.current = analyser;
     analyserDataRef.current = new Uint8Array(analyser.frequencyBinCount);
     waveformDataRef.current = new Uint8Array(analyser.fftSize);
-
-    if (context.state === 'suspended') {
-      await context.resume().catch(() => undefined);
-    }
 
     const tick = () => {
       const node = analyserRef.current;
@@ -671,7 +1112,7 @@ export function RunConsole({ onRunChange }: Props) {
     const rec = recognitionRef.current;
     if (isListening && rec) {
       resumeListeningAfterSpeechRef.current = true;
-      recognitionSuspendUntilRef.current = Date.now() + 3000;
+      recognitionSuspendUntilRef.current = Date.now() + SPEECH_ECHO_GUARD_MS;
       rec.stop();
     }
 
@@ -680,31 +1121,35 @@ export function RunConsole({ onRunChange }: Props) {
     setSpeakingLevel(1);
   };
 
-  const finishSpeechSession = () => {
+  const finishSpeechSession = (options?: { followUpAgentId?: string; autoListenAfterQuestion?: boolean }) => {
     speakingRef.current = false;
     remoteSpeechPendingRef.current = false;
     setInterimText('');
-    setSpeakingLevel(0);
-    setSpeechMotion(0);
-    setSpeechBands((prev) => prev.map(() => 0));
     browserSpeechPulseRef.current = 0;
     if (browserSpeechDecayRef.current) {
       cancelAnimationFrame(browserSpeechDecayRef.current);
       browserSpeechDecayRef.current = null;
     }
     setBrainState(runInFlightRef.current ? 'thinking' : 'idle');
-    recognitionSuspendUntilRef.current = Date.now() + 4000;
+    recognitionSuspendUntilRef.current = Date.now() + SPEECH_ECHO_GUARD_MS;
 
     const rec = recognitionRef.current;
-    if (resumeListeningAfterSpeechRef.current && rec) {
-      resumeListeningAfterSpeechRef.current = false;
+    const shouldResumeListening = resumeListeningAfterSpeechRef.current;
+    const shouldAutoFollowUp = Boolean(options?.followUpAgentId && options.autoListenAfterQuestion !== false);
+    resumeListeningAfterSpeechRef.current = false;
+    if ((shouldResumeListening || shouldAutoFollowUp) && rec) {
       window.setTimeout(() => {
+        if (shouldAutoFollowUp && options?.followUpAgentId) {
+          armFollowUpTimeout(options.followUpAgentId);
+        }
         try {
           rec.start();
         } catch {
           // no-op
         }
-      }, 380);
+      }, SPEECH_RESUME_DELAY_MS);
+    } else if (!shouldAutoFollowUp) {
+      clearFollowUpState();
     }
   };
 
@@ -713,10 +1158,13 @@ export function RunConsole({ onRunChange }: Props) {
     narrationQueueRef.current = [];
     narrationActiveRef.current = false;
     remoteSpeechPendingRef.current = false;
+    clearFollowUpState();
+    setPendingRemotePlayback(null);
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current = null;
     }
+    stopRemotePlaybackPulse();
     stopAudioAnalysis();
     if (audioObjectUrlRef.current) {
       URL.revokeObjectURL(audioObjectUrlRef.current);
@@ -740,9 +1188,11 @@ export function RunConsole({ onRunChange }: Props) {
     rawText: string,
     runId?: string,
     options?: {
+      agentId?: string;
       profile?: VoiceProfile;
       transcriptRole?: TranscriptRole;
       markAsFinal?: boolean;
+      autoListenAfterQuestion?: boolean;
       onDone?: () => void;
     },
   ) => {
@@ -754,6 +1204,7 @@ export function RunConsole({ onRunChange }: Props) {
 
     const text = normalizeSpeechText(rawText).slice(0, 900);
     if (!text) return;
+    activateSpeaker(options?.agentId ?? activeAgentId);
     if (options?.transcriptRole !== 'system') {
       lastAssistantSpeechRef.current = { text, at: Date.now() };
     }
@@ -801,7 +1252,10 @@ export function RunConsole({ onRunChange }: Props) {
     const speakNext = () => {
       const sentence = sentences[idx];
       if (!sentence) {
-        finishSpeechSession();
+        finishSpeechSession({
+          followUpAgentId: options?.agentId ?? activeAgentId,
+          autoListenAfterQuestion: options?.autoListenAfterQuestion !== false && looksLikeFollowUpQuestion(text),
+        });
         options?.onDone?.();
         return;
       }
@@ -833,7 +1287,7 @@ export function RunConsole({ onRunChange }: Props) {
         idx += 1;
         window.setTimeout(speakNext, voiceProfile === 'natural' ? 150 : 90);
       };
-      utter.onerror = finishSpeechSession;
+      utter.onerror = () => finishSpeechSession();
 
       window.speechSynthesis.speak(utter);
     };
@@ -854,20 +1308,26 @@ export function RunConsole({ onRunChange }: Props) {
 
   const speakRemote = async (
     rawText: string,
-    runId: string,
+    runId?: string,
     options?: {
+      agentId?: string;
       provider?: 'openai' | 'elevenlabs' | 'parler';
       voice?: NeuralVoice;
       profile?: VoiceProfile;
       persona?: string;
       premiumVoiceId?: string;
+      transcriptRole?: TranscriptRole;
+      autoListenAfterQuestion?: boolean;
     },
   ) => {
     if (runId && lastSpokenRunRef.current === runId) return;
 
     const text = normalizeSpeechText(rawText).slice(0, 900);
     if (!text) return;
-    lastAssistantSpeechRef.current = { text, at: Date.now() };
+    if (options?.transcriptRole !== 'system') {
+      lastAssistantSpeechRef.current = { text, at: Date.now() };
+    }
+    activateSpeaker(options?.agentId ?? activeAgentId);
 
     prepareSpeechSession();
     remoteSpeechPendingRef.current = true;
@@ -875,14 +1335,24 @@ export function RunConsole({ onRunChange }: Props) {
     prepareSpeechSession();
 
     try {
-      const blob = await getRunSpeech(runId, {
-        agentId: 'writer',
-        provider: options?.provider ?? voiceEngine,
-        voice: options?.voice ?? neuralVoice,
-        profile: options?.profile ?? voiceProfile,
-        persona: options?.persona,
-        premiumVoiceId: options?.premiumVoiceId,
-      });
+      const blob = runId
+        ? await getRunSpeech(runId, {
+            agentId: options?.agentId ?? activeAgentId,
+            provider: options?.provider ?? voiceEngine,
+            voice: options?.voice ?? neuralVoice,
+            profile: options?.profile ?? voiceProfile,
+            persona: options?.persona,
+            premiumVoiceId: options?.premiumVoiceId,
+          })
+        : await testTts({
+            text,
+            agentId: options?.agentId ?? activeAgentId,
+            provider: options?.provider ?? voiceEngine,
+            voice: options?.voice ?? neuralVoice,
+            profile: options?.profile ?? voiceProfile,
+            persona: options?.persona,
+            premiumVoiceId: options?.premiumVoiceId,
+          });
       if (!blob.size) throw new Error('Empty audio response');
 
       const objectUrl = URL.createObjectURL(blob);
@@ -890,13 +1360,36 @@ export function RunConsole({ onRunChange }: Props) {
       const audio = new Audio(objectUrl);
       audioRef.current = audio;
       audio.preload = 'auto';
-      await attachAudioAnalysis(audio);
+      audio.playsInline = true;
       remoteSpeechPendingRef.current = false;
+
+      audio.onplay = () => {
+        activateSpeaker(options?.agentId ?? activeAgentId);
+        speakingRef.current = true;
+        setBrainState('speaking');
+        setSpeakingLevel((prev) => Math.max(prev, 0.72));
+        setSpeechMotion((prev) => Math.max(prev, 0.58));
+        startRemotePlaybackPulse(audio);
+      };
+
+      audio.onplaying = () => {
+        activateSpeaker(options?.agentId ?? activeAgentId);
+        speakingRef.current = true;
+        setBrainState('speaking');
+        setSpeakingLevel((prev) => Math.max(prev, 0.78));
+        setSpeechMotion((prev) => Math.max(prev, 0.62));
+        startRemotePlaybackPulse(audio);
+      };
 
       audio.onended = () => {
         remoteSpeechPendingRef.current = false;
+        setPendingRemotePlayback(null);
+        stopRemotePlaybackPulse();
         stopAudioAnalysis();
-        finishSpeechSession();
+        finishSpeechSession({
+          followUpAgentId: options?.agentId ?? activeAgentId,
+          autoListenAfterQuestion: options?.autoListenAfterQuestion !== false && looksLikeFollowUpQuestion(text),
+        });
         if (audioObjectUrlRef.current) {
           URL.revokeObjectURL(audioObjectUrlRef.current);
           audioObjectUrlRef.current = null;
@@ -906,6 +1399,8 @@ export function RunConsole({ onRunChange }: Props) {
 
       audio.onerror = () => {
         remoteSpeechPendingRef.current = false;
+        setPendingRemotePlayback(null);
+        stopRemotePlaybackPulse();
         stopAudioAnalysis();
         finishSpeechSession();
         if (audioObjectUrlRef.current) {
@@ -915,31 +1410,60 @@ export function RunConsole({ onRunChange }: Props) {
         audioRef.current = null;
       };
 
-      await audio.play();
-      lastSpokenRunRef.current = runId;
+      try {
+        await audio.play();
+        void attachAudioAnalysis(audio).catch(() => undefined);
+      } catch (playError) {
+        const playDetail = playError instanceof Error && playError.message ? playError.message : 'Audio playback was blocked.';
+        setPendingRemotePlayback({ agentId: options?.agentId ?? activeAgentId, text });
+        setTranscript((prev) => [
+          {
+            id: crypto.randomUUID(),
+            role: 'system',
+            text: `${playDetail} Tap Play Pending Response to hear this reply.`,
+            ts: new Date().toISOString(),
+          },
+          ...prev,
+        ].slice(0, 40));
+        finishSpeechSession();
+        return;
+      }
+      if (runId) lastSpokenRunRef.current = runId;
 
       setTranscript((prev) => [
         {
           id: crypto.randomUUID(),
-          role: 'brain',
+          role: options?.transcriptRole ?? 'brain',
           text,
           ts: new Date().toISOString(),
         },
         ...prev,
       ].slice(0, 40));
-    } catch {
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : 'Remote voice unavailable.';
       remoteSpeechPendingRef.current = false;
       finishSpeechSession();
+      const fallbackBlocked = options?.provider === 'elevenlabs' || voiceEngine === 'elevenlabs';
       setTranscript((prev) => [
         {
           id: crypto.randomUUID(),
           role: 'system',
-          text: 'Remote voice unavailable, switched to browser speech.',
+          text: fallbackBlocked ? `${detail} Browser fallback blocked for ElevenLabs mode.` : `${detail} Switched to browser speech.`,
           ts: new Date().toISOString(),
         },
         ...prev,
       ].slice(0, 40));
-      speakBrowser(text, runId, { profile: options?.profile });
+      if (fallbackBlocked) {
+        setBrainState(runInFlightRef.current ? 'thinking' : 'idle');
+        setSpeakingLevel(0);
+        return;
+      }
+      speakBrowser(text, runId, {
+        agentId: options?.agentId,
+        profile: options?.profile,
+        transcriptRole: options?.transcriptRole,
+        autoListenAfterQuestion: options?.autoListenAfterQuestion,
+      });
     }
   };
 
@@ -947,23 +1471,34 @@ export function RunConsole({ onRunChange }: Props) {
     rawText: string,
     runId?: string,
     options?: {
+      agentId?: string;
       voice?: NeuralVoice;
       profile?: VoiceProfile;
       persona?: string;
       premiumVoiceId?: string;
+      transcriptRole?: TranscriptRole;
+      autoListenAfterQuestion?: boolean;
     },
   ) => {
-    if ((voiceEngine === 'openai' || voiceEngine === 'elevenlabs' || voiceEngine === 'parler') && runId) {
+    if (voiceEngine === 'openai' || voiceEngine === 'elevenlabs' || voiceEngine === 'parler') {
       await speakRemote(rawText, runId, {
+        agentId: options?.agentId,
         provider: voiceEngine,
         voice: options?.voice,
         profile: options?.profile,
         persona: options?.persona,
         premiumVoiceId: options?.premiumVoiceId,
+        transcriptRole: options?.transcriptRole,
+        autoListenAfterQuestion: options?.autoListenAfterQuestion,
       });
       return;
     }
-    speakBrowser(rawText, runId, { profile: options?.profile });
+    speakBrowser(rawText, runId, {
+      agentId: options?.agentId,
+      profile: options?.profile,
+      transcriptRole: options?.transcriptRole,
+      autoListenAfterQuestion: options?.autoListenAfterQuestion,
+    });
   };
 
   const mapEvent = (evt: Record<string, unknown>): EventView => ({
@@ -980,11 +1515,13 @@ export function RunConsole({ onRunChange }: Props) {
     const next = narrationQueueRef.current.shift();
     if (!next) return;
     const profile = (agentProfiles[next.node]?.speech_style as VoiceProfile | undefined) ?? 'natural';
+    activateSpeaker(next.node);
     narrationActiveRef.current = true;
     speakBrowser(next.text, undefined, {
       profile,
       transcriptRole: 'system',
       markAsFinal: false,
+      autoListenAfterQuestion: false,
       onDone: () => {
         narrationActiveRef.current = false;
         if (runInFlightRef.current) {
@@ -996,6 +1533,8 @@ export function RunConsole({ onRunChange }: Props) {
 
   const launchRun = async (launchTask: string) => {
     if (runInFlightRef.current) return;
+    void unlockAudioPlayback();
+    clearFollowUpState();
 
     if (silenceTimerRef.current) {
       window.clearTimeout(silenceTimerRef.current);
@@ -1008,12 +1547,25 @@ export function RunConsole({ onRunChange }: Props) {
     setEvents([]);
     setSpeakingLevel(0.45);
     previewStateRef.current = { runId: null, count: 0 };
+    activateSpeaker('coordinator');
 
     streamRef.current?.close();
     if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current);
 
+    const coordinator = agentProfiles.coordinator;
+    const ack = 'One moment.';
+    void speak(ack, undefined, {
+      agentId: 'coordinator',
+      voice: (coordinator?.speech_voice as NeuralVoice | undefined) ?? neuralVoice,
+      profile: (coordinator?.speech_style as VoiceProfile | undefined) ?? 'precise',
+      persona: coordinator?.speech_persona,
+      premiumVoiceId: coordinator?.premium_voice_id,
+      transcriptRole: 'system',
+      autoListenAfterQuestion: false,
+    });
+
     try {
-      const created = await startRun(launchTask, mode);
+      const created = await startRun(launchTask, mode, conservativeSpecialistRouting);
       onRunChange(created.run_id, null);
 
       const source = streamEvents(created.run_id, (evt) => {
@@ -1024,12 +1576,15 @@ export function RunConsole({ onRunChange }: Props) {
         setEvents((prev) => [mapped, ...prev].slice(0, 220));
 
         if (mapped.status === 'start') {
-          setBrainState('thinking');
-          setSpeakingLevel(0.35);
+          if (!speakingRef.current) {
+            setBrainState('thinking');
+            setSpeakingLevel((prev) => Math.max(prev, 0.35));
+          }
         }
 
         if (mapped.status === 'speech_partial') {
           const agentId = String(evt.agent_id ?? mapped.node ?? 'writer');
+          activateSpeaker(agentId);
           const previewProfile = (evt.speech_style as VoiceProfile | undefined)
             ?? (agentProfiles[agentId]?.speech_style as VoiceProfile | undefined)
             ?? 'natural';
@@ -1039,6 +1594,7 @@ export function RunConsole({ onRunChange }: Props) {
               profile: previewProfile,
               transcriptRole: 'brain',
               markAsFinal: false,
+              autoListenAfterQuestion: false,
             });
           }
           return;
@@ -1082,14 +1638,17 @@ export function RunConsole({ onRunChange }: Props) {
             const state = detail.state as Record<string, unknown>;
             const spoken = String(state.spoken_response ?? detail.output ?? '');
             if (spoken) {
-              const writer = agentProfiles.writer;
-              const resolvedVoice = (writer?.speech_voice as NeuralVoice | undefined) ?? neuralVoice;
-              const resolvedProfile = (writer?.speech_style as VoiceProfile | undefined) ?? voiceProfile;
+              const speakerAgent = String(state.speaker_agent ?? 'writer');
+              activateSpeaker(speakerAgent);
+              const speaker = agentProfiles[speakerAgent] ?? agentProfiles.writer;
+              const resolvedVoice = (speaker?.speech_voice as NeuralVoice | undefined) ?? neuralVoice;
+              const resolvedProfile = (speaker?.speech_style as VoiceProfile | undefined) ?? voiceProfile;
               void speak(spoken, created.run_id, {
+                agentId: speakerAgent,
                 voice: resolvedVoice,
                 profile: resolvedProfile,
-                persona: writer?.speech_persona,
-                premiumVoiceId: writer?.premium_voice_id,
+                persona: speaker?.speech_persona,
+                premiumVoiceId: speaker?.premium_voice_id,
               });
             } else {
               setBrainState('idle');
@@ -1118,6 +1677,7 @@ export function RunConsole({ onRunChange }: Props) {
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    await unlockAudioPlayback();
     await launchRun(task);
   };
 
@@ -1152,16 +1712,57 @@ export function RunConsole({ onRunChange }: Props) {
   };
 
   const toggleListening = () => {
+    if (!speechSupported || loading) return;
     const rec = recognitionRef.current;
     if (!rec) return;
     if (isListening) {
+      clearFollowUpState();
       rec.stop();
       return;
     }
     try {
+      void unlockAudioPlayback();
       rec.start();
     } catch {
       // start can throw if already active
+    }
+  };
+
+  useEffect(() => {
+    const handleMainScreenSpace = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' && event.key !== ' ') return;
+      if (isEditableTarget(event.target)) return;
+      event.preventDefault();
+      toggleListening();
+    };
+
+    window.addEventListener('keydown', handleMainScreenSpace);
+    return () => window.removeEventListener('keydown', handleMainScreenSpace);
+  }, [isListening, loading, speechSupported]);
+
+  const playPendingResponse = async () => {
+    if (!audioRef.current) return;
+    await unlockAudioPlayback();
+    try {
+      if (audioContextRef.current?.state === 'suspended') {
+        await audioContextRef.current.resume().catch(() => undefined);
+      }
+      prepareSpeechSession();
+      await audioRef.current.play();
+      startRemotePlaybackPulse(audioRef.current);
+      setPendingRemotePlayback(null);
+    } catch (error) {
+      const detail = error instanceof Error && error.message ? error.message : 'Audio playback is still blocked.';
+      setTranscript((prev) => [
+        {
+          id: crypto.randomUUID(),
+          role: 'system',
+          text: detail,
+          ts: new Date().toISOString(),
+        },
+        ...prev,
+      ].slice(0, 40));
+      finishSpeechSession();
     }
   };
 
@@ -1171,6 +1772,24 @@ export function RunConsole({ onRunChange }: Props) {
         <h2>BRAIN CORE</h2>
         <p className="muted">{runStateLabel}</p>
       </div>
+
+      {agentProfiles[activeAgentId] && (
+        <div className="agent-spotlight">
+          {isVisualAvatar(agentProfiles[activeAgentId].avatar || '') ? (
+            <img
+              className="agent-spotlight-video"
+              src={agentProfiles[activeAgentId].avatar}
+              alt={agentProfiles[activeAgentId].name}
+            />
+          ) : (
+            <div className="agent-spotlight-avatar">{agentProfiles[activeAgentId].avatar || '•'}</div>
+          )}
+          <div className="agent-spotlight-copy">
+            <strong>{agentProfiles[activeAgentId].name}</strong>
+            <span>{agentProfiles[activeAgentId].id}</span>
+          </div>
+        </div>
+      )}
 
       <NeuralWave
         state={brainState}
@@ -1196,23 +1815,35 @@ export function RunConsole({ onRunChange }: Props) {
           {isListening ? 'Stop Listening' : 'Start Listening'}
         </button>
         <button type="button" onClick={stopAllSpeech}>Stop Speaking</button>
+        {pendingRemotePlayback && (
+          <button type="button" onClick={playPendingResponse}>Play Pending Response</button>
+        )}
       </div>
 
       <div className="voice-profile-row">
         <label>
           Voice Engine
           <select value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value as VoiceEngine)}>
-            <option value="openai">Neural (OpenAI)</option>
             <option value="elevenlabs">Premium (ElevenLabs)</option>
+            <option value="openai">Neural (OpenAI)</option>
             <option value="parler">Parler TTS (HF)</option>
             <option value="browser">Browser (local)</option>
           </select>
         </label>
+        <span className="muted small">
+          {voiceEngine === 'elevenlabs'
+            ? `ElevenLabs: ${voiceProviderState.elevenlabs ?? 'unknown'}`
+            : voiceEngine === 'openai'
+              ? `OpenAI: ${voiceProviderState.openai ?? 'unknown'}`
+              : voiceEngine === 'parler'
+                ? `Parler: ${voiceProviderState.parler_tts ?? 'unknown'}`
+                : 'Browser voice is local only'}
+        </span>
       </div>
 
       <div className="voice-profile-row">
         <label>
-          OpenAI Voice
+          Neural Voice
           <select
             value={neuralVoice}
             onChange={(e) => {
@@ -1221,11 +1852,12 @@ export function RunConsole({ onRunChange }: Props) {
             }}
             disabled={voiceEngine !== 'openai'}
           >
-            <option value="verse">verse</option>
-            <option value="aria">aria</option>
-            <option value="ash">ash</option>
-            <option value="sage">sage</option>
             <option value="alloy">alloy</option>
+            <option value="ash">ash</option>
+            <option value="coral">coral</option>
+            <option value="sage">sage</option>
+            <option value="shimmer">shimmer</option>
+            <option value="verse">verse</option>
           </select>
         </label>
       </div>
@@ -1286,7 +1918,16 @@ export function RunConsole({ onRunChange }: Props) {
           checked={autoSilenceRun}
           onChange={(e) => setAutoSilenceRun(e.target.checked)}
         />
-        Auto-run after 3s silence
+        Auto-run after 1.5s silence
+      </label>
+
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={conservativeSpecialistRouting}
+          onChange={(e) => setConservativeSpecialistRouting(e.target.checked)}
+        />
+        Route specialists only on explicit name or strong intent
       </label>
 
       {!speechSupported && <p className="muted">Speech input is not supported in this browser.</p>}
@@ -1305,6 +1946,10 @@ export function RunConsole({ onRunChange }: Props) {
         </label>
         <button disabled={loading} type="submit">{loading ? 'Running Mission...' : 'Execute Mission'}</button>
       </form>
+
+      <div className="filter-chips">
+        <span className="chip active">Predicted Route: {predictedRoute.label}</span>
+      </div>
 
       <div className="template-save-bar">
         <input value={templateName} onChange={(e) => setTemplateName(e.target.value)} placeholder="Save current prompt as template" />
@@ -1328,6 +1973,46 @@ export function RunConsole({ onRunChange }: Props) {
           <p><strong>ID:</strong> {run.run_id}</p>
           <p><strong>Status:</strong> {run.status}</p>
           <p><strong>Updated:</strong> {new Date(run.updated_at).toLocaleString()}</p>
+          {run.state?.route_decision && typeof run.state.route_decision === 'object' && (
+            <>
+              <p><strong>Actual Route:</strong> {String((run.state.route_decision as Record<string, unknown>).agent_id || 'coordinator')} · {String((run.state.route_decision as Record<string, unknown>).task_type || '')}</p>
+              <p className="muted small">{String((run.state.route_decision as Record<string, unknown>).reason || '')}</p>
+            </>
+          )}
+          {run.state?.run_metrics && typeof run.state.run_metrics === 'object' && (
+            <p><strong>Latency:</strong> {String((run.state.run_metrics as Record<string, unknown>).elapsed_ms || 0)} ms</p>
+          )}
+          {run.state?.policy_version && (
+            <p className="muted small">
+              Policy {String(run.state.policy_version)} · Prompt {String(run.state.prompt_version || '')}
+            </p>
+          )}
+          {Array.isArray(run.state?.warnings) && run.state.warnings.length > 0 && (
+            <div className="events" style={{ marginTop: 12 }}>
+              <h3>Warnings</h3>
+              <ul>
+                {run.state.warnings.map((warning, index) => (
+                  <li key={`${warning}-${index}`}>
+                    <p className="muted event-detail">{String(warning)}</p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {Array.isArray(run.state?.action_items) && run.state.action_items.length > 0 && (
+            <div className="events" style={{ marginTop: 12 }}>
+              <h3>Next Actions</h3>
+              <ul>
+                {run.state.action_items.map((item, index) => (
+                  <li key={`${String((item as Record<string, unknown>).type || index)}-${index}`}>
+                    <p className="muted event-detail">
+                      {String((item as Record<string, unknown>).owner || 'agent')}: {String((item as Record<string, unknown>).label || '')}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 

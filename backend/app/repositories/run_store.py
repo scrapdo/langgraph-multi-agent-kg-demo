@@ -19,20 +19,20 @@ class JsonRunStore:
         self.path = Path(path)
         self._lock = Lock()
         self._data: dict[str, dict[str, Any]] = {}
-        self._loaded = False
 
-    def _ensure_loaded(self) -> None:
-        if self._loaded:
-            return
+    def _reload(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             try:
                 raw = json.loads(self.path.read_text())
                 if isinstance(raw, dict):
                     self._data = raw
+                else:
+                    self._data = {}
             except Exception:
                 self._data = {}
-        self._loaded = True
+        else:
+            self._data = {}
 
     def _flush(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,14 +53,14 @@ class JsonRunStore:
             "updated_at": now,
         }
         with self._lock:
-            self._ensure_loaded()
+            self._reload()
             self._data[run_id] = record
             self._flush()
             return deepcopy(record)
 
     def update(self, run_id: str, **updates: Any) -> dict[str, Any]:
         with self._lock:
-            self._ensure_loaded()
+            self._reload()
             rec = self._data[run_id]
             rec.update(updates)
             rec["updated_at"] = _utc_now()
@@ -69,13 +69,13 @@ class JsonRunStore:
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
-            self._ensure_loaded()
+            self._reload()
             rec = self._data.get(run_id)
             return deepcopy(rec) if rec else None
 
     def update_state(self, run_id: str, transform: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
-            self._ensure_loaded()
+            self._reload()
             rec = self._data[run_id]
             state = deepcopy(rec.get("state") or {})
             new_state = transform(state) or state
@@ -83,6 +83,15 @@ class JsonRunStore:
             rec["updated_at"] = _utc_now()
             self._flush()
             return deepcopy(rec)
+
+    def list(self, limit: int | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            self._reload()
+            rows = list(self._data.values())
+            rows.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+            if limit is not None:
+                rows = rows[:limit]
+            return deepcopy(rows)
 
 
 run_store = JsonRunStore(settings.run_store_path)
