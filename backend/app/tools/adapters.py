@@ -4,7 +4,8 @@ import asyncio
 import html
 import random
 import re
-from urllib.parse import urlparse
+import xml.etree.ElementTree as ET
+from urllib.parse import quote_plus, urlparse
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
@@ -220,6 +221,21 @@ class GeneralNewsTool:
         "crime data",
     ]
 
+    sports_source_keywords = [
+        "espn",
+        "mlb",
+        "fox sports",
+        "cbs sports",
+        "nesn",
+        "masslive",
+        "boston globe",
+        "the athletic",
+        "sports illustrated",
+        "yahoo sports",
+        "nbc sports",
+        "bleacher report",
+    ]
+
     def _looks_like_headline(self, title: str) -> bool:
         cleaned = title.strip()
         if len(cleaned) < 28 or len(cleaned) > 180:
@@ -353,6 +369,114 @@ class GeneralNewsTool:
                 score -= 5
         return score
 
+    def _topic_query_terms(self, query: str) -> list[str]:
+        stopwords = {
+            "what",
+            "whats",
+            "what's",
+            "latest",
+            "news",
+            "headline",
+            "headlines",
+            "about",
+            "with",
+            "tell",
+            "today",
+            "current",
+            "recent",
+            "update",
+            "updates",
+            "the",
+            "this",
+            "that",
+            "team",
+        }
+        return [
+            term
+            for term in re.findall(r"[a-z0-9]+", query.lower())
+            if len(term) >= 3 and term not in stopwords
+        ]
+
+    def _looks_like_sports_topic(self, query: str) -> bool:
+        lowered = query.lower()
+        sports_terms = [
+            "baseball",
+            "basketball",
+            "football",
+            "hockey",
+            "soccer",
+            "mlb",
+            "nba",
+            "nfl",
+            "nhl",
+            "ncaa",
+            "red sox",
+            "yankees",
+            "mets",
+            "dodgers",
+            "celtics",
+            "lakers",
+            "patriots",
+            "bruins",
+        ]
+        return any(term in lowered for term in sports_terms)
+
+    def _score_topic_result(self, candidate: dict[str, str], query: str) -> int:
+        title = candidate["title"].lower()
+        source = candidate.get("source", "").lower()
+        url = candidate["url"].lower()
+        terms = self._topic_query_terms(query)
+        score = 0
+
+        score += sum(8 for term in terms if term in title)
+        score += sum(4 for term in terms if term in source)
+        score += sum(2 for term in terms if term in url)
+
+        if self._looks_like_sports_topic(query):
+            score += sum(6 for keyword in self.sports_source_keywords if keyword in source)
+            score += sum(4 for keyword in self.sports_source_keywords if keyword in url)
+            if any(keyword in title for keyword in ["injury", "lineup", "trade", "rotation", "roster", "series", "opening day", "pitching"]):
+                score += 3
+
+        if any(keyword in title for keyword in ["opinion", "analysis", "podcast", "watch", "video", "betting"]):
+            score -= 5
+        if any(keyword in url for keyword in ["/video", "/watch", "/betting", "/odds"]):
+            score -= 5
+        return score
+
+    async def _search_topic_news(self, client: httpx.AsyncClient, query: str) -> list[dict[str, str]]:
+        rss_query = quote_plus(f"{query} when:2d")
+        url = f"https://news.google.com/rss/search?q={rss_query}&hl=en-US&gl=US&ceid=US:en"
+        response = await client.get(url)
+        response.raise_for_status()
+        root = ET.fromstring(response.text)
+
+        results: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for item in root.findall(".//item"):
+            title = html.unescape((item.findtext("title") or "").strip())
+            link = (item.findtext("link") or "").strip()
+            source = html.unescape((item.findtext("source") or "").strip())
+            if not title or not link:
+                continue
+            cleaned_title = re.sub(r"\s*-\s*" + re.escape(source) + r"$", "", title, flags=re.IGNORECASE) if source else title
+            normalized_link = link.split("#", 1)[0]
+            if normalized_link in seen:
+                continue
+            seen.add(normalized_link)
+            candidate = {
+                "title": cleaned_title.strip(),
+                "url": normalized_link,
+                "domain": urlparse(normalized_link).netloc.replace("www.", "") or "news.google.com",
+                "source": source or "Google News",
+            }
+            if self._score_topic_result(candidate, query) <= 0:
+                continue
+            results.append(candidate)
+            if len(results) >= 10:
+                break
+        return results
+
     async def _fetch_outlet_candidates(self, client: httpx.AsyncClient, label: str, url: str) -> list[dict[str, str]]:
         try:
             response = await client.get(url)
@@ -366,6 +490,18 @@ class GeneralNewsTool:
 
     @retry(stop=stop_after_attempt(2), wait=wait_exponential_jitter(initial=1, max=6))
     async def run(self, query: str, mode: str, news_mode: str = "national_major") -> ToolResult:
+        if news_mode == "topic_search":
+            async with httpx.AsyncClient(timeout=12, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                ranked = await self._search_topic_news(client, query)
+            payload = {
+                "items": [f"{item['title']} [{item.get('source') or item['domain']}]" for item in ranked[:6]],
+                "results": ranked[:6],
+                "source_type": "topic_news_search",
+                "news_mode": news_mode,
+                "mode": mode,
+            }
+            return ToolResult(tool=self.name, ok=True, payload=payload)
+
         if news_mode == "baltimore_local":
             selected_sources = [item for item in self.outlet_sources if item[0] in {"The Baltimore Banner", "Baltimore Sun", "WBAL-TV", "WMAR"}]
         elif news_mode == "mixed":

@@ -131,7 +131,7 @@ def _detect_task_type(task: str) -> str:
         "what happened today",
         "breaking news",
     ]
-    if any(trigger in text for trigger in news_triggers):
+    if any(trigger in text for trigger in news_triggers) or _looks_like_topic_news_request(text):
         return "news_brief"
 
     capability_triggers = [
@@ -220,6 +220,19 @@ def _detect_task_type(task: str) -> str:
     return "conversation"
 
 
+def _looks_like_topic_news_request(text: str) -> bool:
+    lowered = text.lower().strip()
+    topic_patterns = [
+        r"\bwhat(?:'s| is)?\s+the\s+latest\s+(?:news\s+)?(?:on|about)\b",
+        r"\b(?:latest|recent|current)\s+news\s+(?:on|about)\b",
+        r"\bnews\s+(?:on|about)\b",
+        r"\bheadline(?:s)?\s+(?:on|about)\b",
+        r"\b(?:update|updates)\s+on\b",
+        r"\bwhat(?:'s| is)?\s+new\s+with\b",
+    ]
+    return any(re.search(pattern, lowered) for pattern in topic_patterns)
+
+
 def _detect_news_mode(task: str) -> str:
     text = task.lower().strip()
     baltimore_tokens = ["baltimore", "maryland", "local news", "local headlines", "local events"]
@@ -230,6 +243,8 @@ def _detect_news_mode(task: str) -> str:
 
     if has_mixed:
         return "mixed"
+    if _looks_like_topic_news_request(text):
+        return "topic_search"
     if has_baltimore:
         return "baltimore_local"
     return "national_major"
@@ -365,7 +380,7 @@ def _detect_task_type_for_state(task: str, profiles: dict[str, dict[str, Any]], 
         ]
         if any(trigger in text for trigger in capability_triggers):
             return "capabilities"
-        if any(trigger in text for trigger in ["major news", "news today", "headlines today", "current events", "latest news", "breaking news"]):
+        if any(trigger in text for trigger in ["major news", "news today", "headlines today", "current events", "latest news", "breaking news"]) or _looks_like_topic_news_request(text):
             return "news_brief"
         return "conversation"
 
@@ -1062,9 +1077,18 @@ async def researcher_node(state: AgentState) -> AgentState:
                 notes = list(payload.get("items", []))
                 citations = [item.get("url", "") for item in payload.get("results", []) if isinstance(item, dict) and item.get("url")]
             state.setdefault("warnings", [])
-            if tool_results and any((record.get("payload") or {}).get("source_type") == "direct_outlet_scrape" for record in tool_results if isinstance(record, dict)):
+            source_types = {
+                (record.get("payload") or {}).get("source_type")
+                for record in tool_results
+                if isinstance(record, dict)
+            }
+            if "direct_outlet_scrape" in source_types:
                 state["warnings"].append(
                     "Using direct outlet headline scraping. Sources are prioritized, but this is still lighter-weight than a dedicated newswire or news API."
+                )
+            if "topic_news_search" in source_types:
+                state["warnings"].append(
+                    "Using targeted current-news search results for this topic. Timeliness is better than the general headline scraper, but this is still lighter-weight than a dedicated newswire feed."
                 )
         elif task_type == "shopping":
             general_task = _run_specialist_tools(
@@ -1318,6 +1342,14 @@ async def writer_node(state: AgentState) -> AgentState:
                 report = (
                     "# Baltimore News Brief\n\n"
                     "## Baltimore Local Headlines\n"
+                    + "\n".join(f"- {n}" for n in top_notes)
+                    + "\n\n## Sources\n"
+                    + "\n".join(f"- {c}" for c in top_links)
+                )
+            elif news_mode == "topic_search":
+                report = (
+                    "# Topic News Brief\n\n"
+                    "## Latest Coverage\n"
                     + "\n".join(f"- {n}" for n in top_notes)
                     + "\n\n## Sources\n"
                     + "\n".join(f"- {c}" for c in top_links)
