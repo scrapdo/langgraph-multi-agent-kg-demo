@@ -672,6 +672,14 @@ export interface ProactiveTask {
   schedule: ProactiveSchedule;
   run_count?: number;
   last_run_at?: string | null;
+  // Outcome fields — populated by the scheduler's watcher thread once the
+  // run reaches a terminal state. Use these to answer "did my X run?" honestly.
+  last_run_id?: string | null;
+  last_run_status?: 'completed' | 'failed' | 'degraded' | 'stuck' | string | null;
+  last_run_completed_at?: string | null;
+  last_success_at?: string | null;
+  last_output_summary?: string | null;
+  last_error?: string | null;
 }
 
 export async function createProactiveTask(payload: {

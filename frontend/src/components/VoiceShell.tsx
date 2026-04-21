@@ -7,7 +7,9 @@ import {
   getRunSpeech,
   listProactiveTasks,
   quickLookup,
+  type ProactiveTask,
 } from '../api/client';
+import { useProactiveBriefings } from '../lib/useProactiveBriefings';
 import { useRealtimeAgent, type RealtimeState, type RealtimeToolCall } from '../lib/useRealtimeAgent';
 import { useSpecialistHandoff, type SpecialistArtifact } from '../lib/useSpecialistHandoff';
 import { Badge, Button, Card, Input, cn } from '../ui';
@@ -300,6 +302,33 @@ export function VoiceShell() {
       .catch(() => {});
   }, []);
 
+  // Proactive briefings — polls /proactive every ~45s and surfaces completed
+  // scheduled-task outputs in the OutputsRail. Also fires a desktop
+  // notification (via the Electron bridge) when a new briefing lands.
+  const briefings = useProactiveBriefings({
+    onNewlyCompleted: (task) => {
+      const preview = (task.last_output_summary || '').slice(0, 180);
+      const title = `${task.name} is ready`;
+      pushTranscript('system', `Briefing ready: ${task.name}`);
+      // Electron bridge — no-op in a plain browser tab.
+      window.desktop?.notify?.({ title, body: preview, silent: false });
+    },
+  });
+
+  const onReplayBriefing = useCallback((task: ProactiveTask) => {
+    const runId = task.last_run_id;
+    if (!runId) return;
+    // The scheduler routes through forced task_type, so the run's speaker_agent
+    // will be the specialist (researcher / news / etc). Letting the backend
+    // pick the agent voice keeps it consistent with how the run was produced.
+    void getRunSpeech(runId, { provider: 'elevenlabs' })
+      .then((blob) => {
+        const audio = new Audio(URL.createObjectURL(blob));
+        void audio.play();
+      })
+      .catch(() => {});
+  }, []);
+
   const visualizerState = useMemo(() => realtimeToVisualizer(realtime.state), [realtime.state]);
   // Drive the visualizer off whichever side is louder — input while listening, output while speaking.
   const level = Math.max(realtime.inputLevel, realtime.outputLevel);
@@ -495,7 +524,13 @@ export function VoiceShell() {
 
       {/* Right rail — team outputs. */}
       <div className="h-full min-h-[600px]">
-        <OutputsRail artifacts={handoff.artifacts} onDismiss={handoff.dismissArtifact} onReplay={onReplay} />
+        <OutputsRail
+          artifacts={handoff.artifacts}
+          onDismiss={handoff.dismissArtifact}
+          onReplay={onReplay}
+          briefings={briefings.briefings}
+          onReplayBriefing={onReplayBriefing}
+        />
       </div>
     </div>
   );
