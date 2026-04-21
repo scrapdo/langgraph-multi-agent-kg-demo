@@ -106,7 +106,7 @@ export function DesktopOpsPanel({ runId, run, editingSchedule, onLoadedSchedule 
   const [scheduleName, setScheduleName] = useState('Weekday Morning Brief');
   const [scheduleWorkflow, setScheduleWorkflow] = useState('morning_brief');
   const [scheduleAgent, setScheduleAgent] = useState('coordinator');
-  const [scheduleMode, setScheduleMode] = useState<'simulation' | 'live'>('simulation');
+  const [scheduleMode] = useState<'live'>('live');
   const [scheduleApprovalRequired, setScheduleApprovalRequired] = useState(false);
   const [scheduleOutputPreset, setScheduleOutputPreset] = useState('custom');
   const [scheduleOutputSubdir, setScheduleOutputSubdir] = useState('');
@@ -470,13 +470,6 @@ export function DesktopOpsPanel({ runId, run, editingSchedule, onLoadedSchedule 
               <option value="researcher">researcher</option>
               <option value="writer">writer</option>
               <option value="wellness">wellness</option>
-            </select>
-          </label>
-          <label>
-            Mode
-            <select value={scheduleMode} onChange={(e) => setScheduleMode(e.target.value as 'simulation' | 'live')}>
-              <option value="simulation">simulation</option>
-              <option value="live">live</option>
             </select>
           </label>
           <label>

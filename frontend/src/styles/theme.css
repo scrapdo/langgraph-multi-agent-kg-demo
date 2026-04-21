@@ -1,0 +1,124 @@
+/*
+ * KG Multi-Agent — design tokens
+ *
+ * Two themes (dark default, light) drive color, elevation, and text.
+ * Tokens are consumed via Tailwind v4 (`@theme`) and via plain CSS variables
+ * for the handful of bespoke surfaces (visualizer, graph canvas, HUD effects).
+ */
+
+@theme {
+  /* ---- Color: base canvas (dark defaults, overridden by [data-theme="light"]) ---- */
+  --color-bg-canvas: #0a0d12;
+  --color-bg-surface: #10151d;
+  --color-bg-elevated: #161d27;
+  --color-bg-sunken: #070a0f;
+  --color-bg-overlay: rgba(10, 13, 18, 0.72);
+
+  --color-fg-default: #e8edf4;
+  --color-fg-muted: #9aa7b8;
+  --color-fg-subtle: #6b7789;
+  --color-fg-inverse: #0a0d12;
+  --color-fg-on-accent: #041014;
+
+  --color-border-default: rgba(255, 255, 255, 0.08);
+  --color-border-strong: rgba(255, 255, 255, 0.16);
+  --color-border-subtle: rgba(255, 255, 255, 0.04);
+  --color-border-accent: rgba(41, 216, 255, 0.55);
+
+  --color-accent: #29d8ff;
+  --color-accent-hover: #6be5ff;
+  --color-accent-strong: #00b6e0;
+  --color-accent-subtle: rgba(41, 216, 255, 0.14);
+
+  --color-success: #34d399;
+  --color-warning: #fbbf24;
+  --color-danger: #fb7185;
+  --color-info: #60a5fa;
+  --color-neutral: #9aa7b8;
+
+  /* ---- Typography ---- */
+  --font-sans: 'Inter', 'Inter Variable', 'Segoe UI', 'Helvetica Neue', sans-serif;
+  --font-display: 'Inter', 'Inter Variable', 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'JetBrains Mono Variable', 'SFMono-Regular', Menlo, monospace;
+
+  --text-xs: 0.75rem;     /* 12 */
+  --text-sm: 0.8125rem;   /* 13 */
+  --text-base: 0.9375rem; /* 15 */
+  --text-md: 1rem;        /* 16 */
+  --text-lg: 1.125rem;    /* 18 */
+  --text-xl: 1.25rem;     /* 20 */
+  --text-2xl: 1.5rem;     /* 24 */
+  --text-3xl: 1.875rem;   /* 30 */
+  --text-4xl: 2.25rem;    /* 36 */
+
+  /* ---- Spacing (4-based) ---- */
+  --spacing-0: 0;
+  --spacing-1: 0.25rem;
+  --spacing-2: 0.5rem;
+  --spacing-3: 0.75rem;
+  --spacing-4: 1rem;
+  --spacing-5: 1.25rem;
+  --spacing-6: 1.5rem;
+  --spacing-8: 2rem;
+  --spacing-10: 2.5rem;
+  --spacing-12: 3rem;
+  --spacing-16: 4rem;
+
+  /* ---- Radius ---- */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* ---- Elevation ---- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.4);
+
+  /* ---- Motion ---- */
+  --motion-fast: 120ms;
+  --motion-base: 240ms;
+  --motion-slow: 480ms;
+  --easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --easing-emphasized: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---- Light theme override ---- */
+[data-theme="light"] {
+  --color-bg-canvas: #f7f8fa;
+  --color-bg-surface: #ffffff;
+  --color-bg-elevated: #ffffff;
+  --color-bg-sunken: #eef0f4;
+  --color-bg-overlay: rgba(247, 248, 250, 0.78);
+
+  --color-fg-default: #0b1119;
+  --color-fg-muted: #52606d;
+  --color-fg-subtle: #7b8696;
+  --color-fg-inverse: #ffffff;
+  --color-fg-on-accent: #001014;
+
+  --color-border-default: rgba(11, 17, 25, 0.1);
+  --color-border-strong: rgba(11, 17, 25, 0.18);
+  --color-border-subtle: rgba(11, 17, 25, 0.05);
+  --color-border-accent: rgba(0, 145, 178, 0.45);
+
+  --color-accent: #0094b5;
+  --color-accent-hover: #00b4d8;
+  --color-accent-strong: #007090;
+  --color-accent-subtle: rgba(0, 148, 181, 0.1);
+
+  --shadow-sm: 0 1px 2px rgba(20, 30, 50, 0.06);
+  --shadow-md: 0 4px 14px rgba(20, 30, 50, 0.08);
+  --shadow-lg: 0 14px 36px rgba(20, 30, 50, 0.12);
+}
+
+/* ---- Reduced motion ---- */
+@media (prefers-reduced-motion: reduce) {
+  @theme {
+    --motion-fast: 0ms;
+    --motion-base: 0ms;
+    --motion-slow: 0ms;
+  }
+}

@@ -6,12 +6,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.pricing import estimate_cost_usd
+from app.core.token_tracker import TokenTracker
 from app.events.bus import event_bus
 from app.graph.workflow import build_graph
 from app.repositories.run_store import run_store
 from app.services.agent_profile_service import agent_profile_service
 from app.services.memory_service import memory_service
 from app.services.neo4j_service import neo4j_service
+from app.services.user_profile_service import user_profile_service
 
 workflow_app = build_graph()
 
@@ -134,6 +137,14 @@ def _spawn_deferred_persistence(result: dict[str, Any]) -> None:
     threading.Thread(target=_runner, daemon=True).start()
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough tokens-from-chars estimate. ~4 chars per token is the common
+    heuristic for English + code; close enough for a UI badge, zero deps."""
+    if not text:
+        return 0
+    return max(1, round(len(text) / 4))
+
+
 async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, Any]:
     started_at = datetime.now(tz=timezone.utc)
     run_store.update(run_id, status="running")
@@ -148,16 +159,43 @@ async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, A
     )
     await event_bus.publish(run_id, {"node": "system", "status": "running", "detail": "Run started"})
 
+    tracker = TokenTracker()
     try:
-        config = {"configurable": {"thread_id": run_id}}
+        config = {"configurable": {"thread_id": run_id}, "callbacks": [tracker]}
         result = await workflow_app.ainvoke(initial_state, config=config)
         final_status = result.get("run_status", "completed")
         finished_at = datetime.now(tz=timezone.utc)
+
+        usage = tracker.snapshot()
+        if usage["total"] > 0:
+            prompt_tokens = usage["prompt"]
+            completion_tokens = usage["completion"]
+            total_tokens = usage["total"]
+            token_accuracy = "actual"
+        else:
+            # LangChain didn't expose token metadata for this provider —
+            # fall back to the chars/4 heuristic so the UI still has a number.
+            prompt_tokens = _estimate_tokens(initial_state.get("task", ""))
+            completion_tokens = _estimate_tokens(result.get("final_report", "") or "")
+            total_tokens = prompt_tokens + completion_tokens
+            token_accuracy = "estimated"
+
+        # Rough cost estimate. We don't know the exact model used per node — the
+        # writer's model is a reasonable proxy for the most expensive call, so
+        # the OpenAI default falls back to that. Close enough for a UI badge.
+        estimated_model = result.get("model_used") or None
+        cost_usd = estimate_cost_usd(estimated_model, prompt_tokens, completion_tokens)
+
         result["run_metrics"] = {
             **(result.get("run_metrics") or {}),
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "elapsed_ms": int((finished_at - started_at).total_seconds() * 1000),
+            "estimated_prompt_tokens": prompt_tokens,
+            "estimated_completion_tokens": completion_tokens,
+            "estimated_total_tokens": total_tokens,
+            "estimated_cost_usd": cost_usd,
+            "token_accuracy": token_accuracy,
         }
         run_store.update(run_id, status=final_status, state=result, output=result.get("final_report"))
         await _safe_upsert_run(
@@ -187,9 +225,41 @@ async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, A
         return {"error": str(exc)}
 
 
-def create_run(task: str, mode: str, user_id: str, session_id: str, conservative_specialist_routing: bool = False) -> str:
+def create_run(
+    task: str,
+    mode: str,
+    user_id: str,
+    session_id: str,
+    conservative_specialist_routing: bool = False,
+    forced_task_type: str | None = None,
+) -> str:
     run_id = str(uuid.uuid4())
+
+    operator_context = ""
+    try:
+        operator_context = user_profile_service.render_context()
+    except Exception:
+        operator_context = ""
+
+    # The operator profile lives in state["memory_context"] / state["thread_context"]
+    # for any agent that wants to personalize. We deliberately do NOT concatenate it
+    # into state["task"] because multiple downstream report templates (and stub
+    # tools) paste the task verbatim into their output, which would leak the
+    # operator's private context back through run outputs and TTS.
     run_store.create(run_id=run_id, task=task, mode=mode)
+    # Stash the routing-relevant fields in state immediately so list/search
+    # endpoints can filter even while the run is still queued or in flight.
+    # These are normally populated by the workflow itself at completion; this
+    # pre-population just fills the gap for the queued/running window.
+    run_store.update_state(
+        run_id,
+        lambda current: {
+            **current,
+            "session_id": session_id,
+            "user_id": user_id,
+            "task_type": forced_task_type or "conversation",
+        },
+    )
 
     initial_state = {
         "run_id": run_id,
@@ -201,8 +271,8 @@ def create_run(task: str, mode: str, user_id: str, session_id: str, conservative
         "session_id": session_id,
         "thread_id": session_id,
         "thread_initialized": False,
-        "thread_context": "",
-        "memory_context": "",
+        "thread_context": operator_context,
+        "memory_context": operator_context,
         "episodes": [],
         "episode_ids": [],
         "claims": [],
@@ -213,6 +283,7 @@ def create_run(task: str, mode: str, user_id: str, session_id: str, conservative
         "max_revisions": 2,
         "run_status": "queued",
         "conservative_specialist_routing": conservative_specialist_routing,
+        "forced_task_type": forced_task_type or "",
         "spoken_response": "",
         "research_notes": [],
         "citations": [],
@@ -232,7 +303,9 @@ def create_run(task: str, mode: str, user_id: str, session_id: str, conservative
         "force_degraded": False,
     }
 
-    from app.workers.tasks import execute_run_task
+    # dispatch_run picks Celery if Redis is configured, in-process thread otherwise.
+    # Native-app builds have no Redis → runs happen inside the API process.
+    from app.services.run_dispatcher import dispatch_run
 
-    execute_run_task.delay(run_id, initial_state)
+    dispatch_run(run_id, initial_state)
     return run_id

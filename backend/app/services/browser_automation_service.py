@@ -88,7 +88,7 @@ class BrowserAutomationService:
             "workflow_id": workflow_id,
             "name": str(payload.get("name") or "Browser Workflow"),
             "agent_id": str(payload.get("agent_id") or "researcher"),
-            "mode": str(payload.get("mode") or "simulation"),
+            "mode": str(payload.get("mode") or "live"),
             "start_url": str(payload.get("start_url") or ""),
             "urls": [str(item).strip() for item in list(payload.get("urls") or []) if str(item).strip()],
             "goal": str(payload.get("goal") or ""),

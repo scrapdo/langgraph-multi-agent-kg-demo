@@ -74,7 +74,7 @@ class OperatorInboxService:
                     continue
                 approval_kind = str(approval.get("kind") or "")
                 operation = "social_publish" if approval_kind == "social_post" else "desktop_action"
-                risk = evaluate_operation_risk(operation, mode=str(run.get("mode") or "simulation"), approval_required=True)
+                risk = evaluate_operation_risk(operation, mode=str(run.get("mode") or "live"), approval_required=True)
                 items.append(
                     {
                         "item_id": f"approval:{approval.get('approval_id')}",
@@ -125,7 +125,7 @@ class OperatorInboxService:
                         "last_error": schedule.get("last_error"),
                         "risk": evaluate_operation_risk(
                             "wellness_outreach" if str(schedule.get("workflow_kind") or "") in {"wellness_checkin", "wellness_outreach", "wellness_nudge"} else "desktop_action",
-                            mode=str(schedule.get("mode") or "simulation"),
+                            mode=str(schedule.get("mode") or "live"),
                             approval_required=bool(schedule.get("approval_required")),
                         ),
                     },
@@ -154,7 +154,7 @@ class OperatorInboxService:
                         "output_path": action.get("output_path"),
                         "risk": evaluate_operation_risk(
                             "wellness_outreach" if str(action.get("kind") or "") == "wellness_checkin" else "desktop_action",
-                            mode=str((action.get("payload") or {}).get("mode") or "simulation"),
+                            mode=str((action.get("payload") or {}).get("mode") or "live"),
                         ),
                     },
                 }

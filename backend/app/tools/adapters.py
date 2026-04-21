@@ -5,7 +5,8 @@ import html
 import random
 import re
 import xml.etree.ElementTree as ET
-from urllib.parse import quote_plus, urlparse
+from typing import Any
+from urllib.parse import quote, quote_plus, unquote, urlparse
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
@@ -21,15 +22,16 @@ class MarketNewsTool:
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential_jitter(initial=1, max=8))
     async def run(self, query: str, mode: str) -> ToolResult:
-        items = [
-            f"Macro update relevant to {query}",
-            f"Sector flow signal for {query}",
-            f"Earnings sentiment change around {query}",
-        ]
-        payload = {
-            "items": items,
+        # Intentionally return empty items. This tool is a placeholder for a
+        # future real market-data adapter; echoing the query into stub strings
+        # (the old behavior) polluted downstream research reports with the
+        # operator's profile when the task was profile-enriched. The writer
+        # LLM handles sparse notes gracefully.
+        payload: dict[str, Any] = {
+            "items": [],
             "confidence": round(0.65 + random.random() * 0.3, 2),
             "mode": mode,
+            "note": "Live market data source is not configured; research LLM will answer from general knowledge.",
         }
         return ToolResult(tool=self.name, ok=True, payload=payload)
 

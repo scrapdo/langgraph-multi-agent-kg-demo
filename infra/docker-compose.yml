@@ -3,30 +3,40 @@ services:
     build:
       context: ../backend
     env_file:
-      - ../.env
+      - path: ../.env
+        required: true
+      - path: ${HOME}/.config/kg-multi-agent/secrets.env
+        required: false
     volumes:
       - ../backend/data:/app/data
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
     depends_on:
       neo4j:
         condition: service_healthy
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
 
   worker:
     build:
       context: ../backend
     env_file:
-      - ../.env
+      - path: ../.env
+        required: true
+      - path: ${HOME}/.config/kg-multi-agent/secrets.env
+        required: false
     volumes:
       - ../backend/data:/app/data
     command: celery -A app.workers.celery_app.celery_app worker -l info
+    restart: unless-stopped
     depends_on:
-      - api
-      - redis
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
 
   frontend:
     build:
@@ -34,19 +44,21 @@ services:
       args:
         VITE_API_BASE: http://localhost:8000
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
+    restart: unless-stopped
     depends_on:
       - api
 
   neo4j:
     image: neo4j:5.24
     environment:
-      NEO4J_AUTH: neo4j/password
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in ~/.config/kg-multi-agent/secrets.env}
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     volumes:
       - neo4j_data:/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -54,20 +66,37 @@ services:
       retries: 20
 
   postgres:
+    # Only reachable from other services over the docker network. If you need
+    # to connect a GUI client, uncomment the ports block below or open an ad-hoc
+    # `docker exec -it infra-postgres-1 psql -U postgres agentdb`.
     image: postgres:16
     environment:
       POSTGRES_DB: agentdb
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    ports:
-      - "5432:5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in ~/.config/kg-multi-agent/secrets.env}
+    # ports:
+    #   - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agentdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   redis:
+    # Internal only; uncomment the ports block if you need redis-cli access
+    # from the host.
     image: redis:7
-    ports:
-      - "6379:6379"
+    # ports:
+    #   - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
 
 volumes:
   neo4j_data:

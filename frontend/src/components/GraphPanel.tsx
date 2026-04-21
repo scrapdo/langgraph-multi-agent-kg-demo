@@ -116,11 +116,6 @@ export function GraphPanel({ runId, threadId }: Props) {
         .filter((node) => node.labels.includes('Schedule') && String(node.properties.mode || '') === 'live')
         .map((node) => node.id),
     );
-    const simulationScheduleIds = new Set(
-      graph.nodes
-        .filter((node) => node.labels.includes('Schedule') && String(node.properties.mode || '') === 'simulation')
-        .map((node) => node.id),
-    );
     const pendingRunIds = new Set(
       graph.edges
         .filter((edge) => edge.type === 'DISPATCHED_RUN' && pendingScheduleIds.has(edge.source))
@@ -166,8 +161,6 @@ export function GraphPanel({ runId, threadId }: Props) {
           (node.labels.includes('Run') && failedRunIds.has(node.id));
       } else if (activeShortcut === 'live_schedules') {
         matchesShortcut = node.labels.includes('Schedule') && liveScheduleIds.has(node.id);
-      } else if (activeShortcut === 'simulation_schedules') {
-        matchesShortcut = node.labels.includes('Schedule') && simulationScheduleIds.has(node.id);
       }
       return matchesQuery && matchesLabel && matchesShortcut;
     });
@@ -403,13 +396,6 @@ export function GraphPanel({ runId, threadId }: Props) {
           onClick={() => applyShortcut('live_schedules', [])}
         >
           Live Schedules
-        </button>
-        <button
-          type="button"
-          className={activeShortcut === 'simulation_schedules' ? 'chip active' : 'chip'}
-          onClick={() => applyShortcut('simulation_schedules', [])}
-        >
-          Simulation Schedules
         </button>
         {availableLabels.map((label) => {
           const active = activeLabels.includes(label);

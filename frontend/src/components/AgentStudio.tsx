@@ -73,11 +73,11 @@ function OrgNode({ agent }: OrgNodeProps) {
 }
 
 interface AgentStudioProps {
-  theme: ThemeId;
-  onThemeChange: (theme: ThemeId) => void;
+  theme?: ThemeId;
+  onThemeChange?: (theme: ThemeId) => void;
 }
 
-export function AgentStudio({ theme, onThemeChange }: AgentStudioProps) {
+export function AgentStudio({ theme = 'odyssey', onThemeChange = () => {} }: AgentStudioProps) {
   const [profiles, setProfiles] = useState<Record<string, AgentProfile>>({});
   const [draft, setDraft] = useState<Record<string, AgentProfile>>({});
   const [catalog, setCatalog] = useState<ProvidersCatalog | null>(null);

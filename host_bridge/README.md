@@ -24,23 +24,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. Start the bridge:
+2. Generate an auth token (required — the bridge refuses to start without one):
 
 ```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Store it in `~/.config/kg-multi-agent/secrets.env` as `HOST_AUTOMATION_TOKEN=<value>`. The main backend reads it from the same file.
+
+3. Start the bridge (bind only to localhost):
+
+```bash
+export HOST_AUTOMATION_TOKEN="$(security find-generic-password -a "$USER" -s HOST_AUTOMATION_TOKEN -w 2>/dev/null || grep '^HOST_AUTOMATION_TOKEN=' ~/.config/kg-multi-agent/secrets.env | cut -d= -f2-)"
+export HOST_EXPORTS_ROOT="$HOME/Documents/new-project/backend/data/exports"
 uvicorn server:app --host 127.0.0.1 --port 8899 --reload
 ```
 
-3. Add these to the root `.env`:
+`HOST_EXPORTS_ROOT` must be set so the bridge has an allow-listed directory. Additional roots can be added in `HOST_EXTRA_ROOTS` (colon-separated). Absolute paths outside the allow-list are rejected with HTTP 400.
+
+4. Add this to the root `.env`:
 
 ```env
 HOST_AUTOMATION_BASE_URL=http://host.docker.internal:8899
-HOST_AUTOMATION_TOKEN=
-```
-
-If you want Finder/Word reveal from relative export paths, also set this in the host bridge shell before starting:
-
-```bash
-export HOST_EXPORTS_ROOT="/Users/matt/Documents/new-project/backend/data/exports"
 ```
 
 4. Restart the main app containers.
@@ -59,4 +64,6 @@ export HOST_EXPORTS_ROOT="/Users/matt/Documents/new-project/backend/data/exports
 
 - Microsoft Word must be installed on the Mac.
 - The bridge uses `osascript`, so it only works on macOS.
-- If you want authentication, set `HOST_AUTOMATION_TOKEN` in both places and send it as a bearer token.
+- Authentication is required — `HOST_AUTOMATION_TOKEN` must be set at startup and sent by callers as an `Authorization: Bearer <token>` header.
+- Path inputs are restricted to the allow-list (`HOST_EXPORTS_ROOT` / `HOST_EXTRA_ROOTS`) and sanitized — AppleScript is invoked with the path as an argv parameter, not interpolated into the script body, so injection via crafted paths is blocked.
+- Bind the process to `127.0.0.1` only. Exposing it on the LAN is unsupported and unsafe.

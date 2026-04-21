@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'" />
+    <title>Brain — First-Run Setup</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0a0d13;
+        --fg: #e7ecf5;
+        --fg-muted: #8a94a7;
+        --accent: #29d8ff;
+        --surface: #141922;
+        --border: #222a37;
+      }
+      html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+      body { padding: 32px 40px; min-height: 100vh; box-sizing: border-box; }
+      h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+      p.lede { color: var(--fg-muted); margin: 0 0 24px; }
+      form { display: flex; flex-direction: column; gap: 14px; max-width: 560px; }
+      label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-muted); }
+      input[type="text"], input[type="password"] {
+        background: var(--surface); color: var(--fg);
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 10px 12px; font: 13px/1.4 "SF Mono", "Menlo", monospace;
+        outline: none; transition: border-color 120ms;
+      }
+      input:focus { border-color: var(--accent); }
+      .field { display: flex; flex-direction: column; gap: 6px; }
+      .hint { font-size: 12px; color: var(--fg-muted); margin-top: 4px; }
+      .row { display: flex; gap: 12px; justify-content: space-between; align-items: center; margin-top: 20px; }
+      button {
+        background: var(--accent); color: #001018;
+        border: 0; border-radius: 8px; padding: 10px 18px;
+        font: 13px/1 -apple-system, sans-serif; font-weight: 600;
+        cursor: pointer; transition: opacity 120ms;
+      }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button.secondary { background: transparent; color: var(--fg-muted); padding: 10px 0; }
+      button.secondary:hover { color: var(--fg); }
+      .status { font-size: 12px; color: var(--fg-muted); margin-top: 8px; min-height: 16px; }
+      .status.ok { color: #29ff8a; }
+      .status.err { color: #ff6b8a; }
+      details { margin-top: 12px; }
+      details summary { font-size: 12px; color: var(--fg-muted); cursor: pointer; user-select: none; }
+      details[open] summary { color: var(--fg); }
+    </style>
+  </head>
+  <body>
+    <h1>Welcome to the Brain.</h1>
+    <p class="lede">Paste your API keys below. They're stored locally in <code>~/Library/Application Support/Brain/config.json</code> and never leave this machine.</p>
+    <form id="wizard" autocomplete="off">
+      <div class="field">
+        <label for="openai">OpenAI API Key <span style="color:#ff6b8a">*</span></label>
+        <input type="password" id="openai" name="OPENAI_API_KEY" spellcheck="false" placeholder="sk-proj-…" required />
+        <div class="hint">Required. Powers the delegator voice (Realtime) and all specialists.</div>
+      </div>
+
+      <div class="field">
+        <label for="elevenlabs">ElevenLabs API Key</label>
+        <input type="password" id="elevenlabs" name="ELEVENLABS_API_KEY" spellcheck="false" placeholder="Optional — enables custom specialist voices" />
+        <div class="hint">Optional. Without it, specialists use the OpenAI voice instead.</div>
+      </div>
+
+      <details>
+        <summary>Advanced (optional memory + extra providers)</summary>
+        <div style="display:flex; flex-direction:column; gap:14px; margin-top:10px;">
+          <div class="field">
+            <label for="zep">Zep Cloud API Key</label>
+            <input type="password" id="zep" name="ZEP_API_KEY" spellcheck="false" placeholder="Optional — enables long-term memory" />
+            <div class="hint">Optional. Without it, memory works per-session only.</div>
+          </div>
+          <div class="field">
+            <label for="anthropic">Anthropic API Key</label>
+            <input type="password" id="anthropic" name="ANTHROPIC_API_KEY" spellcheck="false" placeholder="Optional" />
+          </div>
+          <div class="field">
+            <label for="openrouter">OpenRouter API Key</label>
+            <input type="password" id="openrouter" name="OPENROUTER_API_KEY" spellcheck="false" placeholder="Optional" />
+          </div>
+        </div>
+      </details>
+
+      <div class="row">
+        <button type="submit" id="save">Save & Start</button>
+      </div>
+      <div id="status" class="status"></div>
+    </form>
+
+    <script>
+      const statusEl = document.getElementById('status');
+      const saveBtn = document.getElementById('save');
+      const form = document.getElementById('wizard');
+
+      // If a partial config already exists, prefill non-secret fields so the
+      // wizard works as an "edit" screen too. We don't prefill the secret
+      // values themselves — only show placeholders like "••• set •••" so the
+      // user can tell which ones are already configured.
+      (async () => {
+        try {
+          const existing = await window.brainWizard.readConfig();
+          for (const [k, v] of Object.entries(existing || {})) {
+            const el = document.querySelector(`[name="${k}"]`);
+            if (el && v) el.placeholder = '••• already set •••';
+          }
+        } catch (e) { /* ignore */ }
+      })();
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        saveBtn.disabled = true;
+        statusEl.className = 'status';
+        statusEl.textContent = 'Saving…';
+
+        const fd = new FormData(form);
+        const existing = await window.brainWizard.readConfig();
+        const patch = { ...(existing || {}) };
+        for (const [k, v] of fd.entries()) {
+          if (typeof v === 'string' && v.trim()) patch[k] = v.trim();
+        }
+
+        try {
+          await window.brainWizard.writeConfig(patch);
+          statusEl.className = 'status ok';
+          statusEl.textContent = 'Saved. Starting the Brain…';
+          await window.brainWizard.startBackend();
+        } catch (err) {
+          statusEl.className = 'status err';
+          statusEl.textContent = String(err?.message || err);
+          saveBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

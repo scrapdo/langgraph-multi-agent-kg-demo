@@ -28,7 +28,7 @@ export function BrowserOpsPanel() {
   const [name, setName] = useState('Research Sweep');
   const [goal, setGoal] = useState('Inspect key pages and summarize the main signal on each.');
   const [seedUrls, setSeedUrls] = useState('https://example.com');
-  const [mode, setMode] = useState<RunMode>('simulation');
+  const [mode] = useState<RunMode>('live');
   const [runResults, setRunResults] = useState<BrowserInspectionResult[]>([]);
   const [playwrightStatus, setPlaywrightStatus] = useState<Record<string, unknown> | null>(null);
   const [scripts, setScripts] = useState<PlaywrightScript[]>([]);
@@ -46,7 +46,7 @@ export function BrowserOpsPanel() {
     ),
   );
   const [scriptResults, setScriptResults] = useState<Array<Record<string, unknown>>>([]);
-  const [scriptMode, setScriptMode] = useState<RunMode>('simulation');
+  const [scriptMode] = useState<RunMode>('live');
   const [scriptApprovalRequired, setScriptApprovalRequired] = useState(false);
   const [scriptAgent, setScriptAgent] = useState(DEFAULT_AGENT);
   const [draftAction, setDraftAction] = useState<BrowserStepDraft['action']>('wait');
@@ -258,13 +258,6 @@ export function BrowserOpsPanel() {
             />
           </label>
           <label>
-            Mode
-            <select value={mode} onChange={(e) => setMode(e.target.value as RunMode)}>
-              <option value="simulation">simulation</option>
-              <option value="live">live</option>
-            </select>
-          </label>
-          <label>
             Agent
             <select value={workflowAgent} onChange={(e) => setWorkflowAgent(e.target.value)}>
               {AGENT_OPTIONS.map((agent) => (
@@ -359,13 +352,6 @@ export function BrowserOpsPanel() {
               Start URL
               <input value={scriptStartUrl} onChange={(e) => setScriptStartUrl(e.target.value)} />
             </label>
-            <label>
-              Mode
-              <select value={scriptMode} onChange={(e) => setScriptMode(e.target.value as RunMode)}>
-                <option value="simulation">simulation</option>
-                <option value="live">live</option>
-              </select>
-            </label>
             <label className="checkbox-row">
               <input
                 type="checkbox"
@@ -436,7 +422,7 @@ export function BrowserOpsPanel() {
                     <strong>{script.name}</strong>
                     <p className="muted small">{script.start_url}</p>
                     <p className="muted small">
-                      {(script.mode || 'simulation')} · {script.approval_required ? 'approval-gated' : 'direct'} · {script.last_status || 'never run'}
+                      {(script.mode || 'live')} · {script.approval_required ? 'approval-gated' : 'direct'} · {script.last_status || 'never run'}
                     </p>
                   </div>
                   <div className="preset-actions">

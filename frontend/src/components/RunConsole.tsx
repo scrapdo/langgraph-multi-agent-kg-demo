@@ -278,6 +278,17 @@ function NeuralWave({
   speechMotion: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const stateRef = useRef(state);
+  const interimTextRef = useRef(interimText);
+  const speakingLevelRef = useRef(speakingLevel);
+  const speechBandsRef = useRef(speechBands);
+  const speechMotionRef = useRef(speechMotion);
+
+  useEffect(() => { stateRef.current = state; }, [state]);
+  useEffect(() => { interimTextRef.current = interimText; }, [interimText]);
+  useEffect(() => { speakingLevelRef.current = speakingLevel; }, [speakingLevel]);
+  useEffect(() => { speechBandsRef.current = speechBands; }, [speechBands]);
+  useEffect(() => { speechMotionRef.current = speechMotion; }, [speechMotion]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -306,19 +317,25 @@ function NeuralWave({
       const height = canvas.clientHeight;
       const centerY = height / 2;
 
+      const _state = stateRef.current;
+      const _speakingLevel = speakingLevelRef.current;
+      const _speechBands = speechBandsRef.current;
+      const _speechMotion = speechMotionRef.current;
+      const _interimText = interimTextRef.current;
+
       ctx.clearRect(0, 0, width, height);
 
-      const baseAmp = state === 'speaking' ? 40 : state === 'listening' ? 26 : state === 'thinking' ? 16 : 10;
-      const amp = baseAmp + speakingLevel * 28 + speechMotion * 22;
-      const glow = state === 'speaking' ? '#06b6d4' : state === 'listening' ? '#67e8f9' : '#f59e0b';
-      const bandAt = (index: number) => speechBands[index % speechBands.length] ?? speakingLevel;
-      const bandMid = speechBands[Math.floor(speechBands.length / 2)] ?? speakingLevel;
-      const bandTreble = speechBands[speechBands.length - 1] ?? speakingLevel;
+      const baseAmp = _state === 'speaking' ? 40 : _state === 'listening' ? 26 : _state === 'thinking' ? 16 : 10;
+      const amp = baseAmp + _speakingLevel * 28 + _speechMotion * 22;
+      const glow = _state === 'speaking' ? '#06b6d4' : _state === 'listening' ? '#67e8f9' : '#f59e0b';
+      const bandAt = (index: number) => _speechBands[index % _speechBands.length] ?? _speakingLevel;
+      const bandMid = _speechBands[Math.floor(_speechBands.length / 2)] ?? _speakingLevel;
+      const bandTreble = _speechBands[_speechBands.length - 1] ?? _speakingLevel;
 
       if (visualizerMode === 'hal') {
         const cx = width / 2;
         const cy = centerY;
-        const outer = 96 + speakingLevel * 12 + bandMid * 10;
+        const outer = 96 + _speakingLevel * 12 + bandMid * 10;
         const middle = 56 + Math.sin(t * 2.2) * 4 + bandAt(3) * 8;
         const inner = 24 + Math.sin(t * 4.8) * 2 + bandTreble * 9;
 
@@ -360,7 +377,7 @@ function NeuralWave({
         ctx.beginPath();
         ctx.fillStyle = '#fff5f5';
         ctx.globalAlpha = 0.9;
-        ctx.arc(cx - 7, cy - 7, 6 + speakingLevel * 2 + bandTreble * 3, 0, Math.PI * 2);
+        ctx.arc(cx - 7, cy - 7, 6 + _speakingLevel * 2 + bandTreble * 3, 0, Math.PI * 2);
         ctx.fill();
       } else if (visualizerMode === 'neon') {
         const waves = 4;
@@ -370,7 +387,7 @@ function NeuralWave({
           ctx.strokeStyle = w % 2 === 0 ? '#2af5ff' : '#9b8cff';
           ctx.globalAlpha = 0.32 + w * 0.12;
           for (let i = 0; i <= width; i += 8) {
-            const band = bandAt(Math.floor((i / Math.max(width, 1)) * speechBands.length));
+            const band = bandAt(Math.floor((i / Math.max(width, 1)) * _speechBands.length));
             const waveAmp = amp * (0.28 + w * 0.15) * (0.65 + band * 0.9);
             const y =
               centerY +
@@ -416,7 +433,7 @@ function NeuralWave({
           const drift = 28 + (i % 11) * 11 + Math.sin(t * 1.8 + i) * amp * (0.18 + band * 0.5);
           const x = width / 2 + Math.cos(angle) * drift + Math.sin(t + i) * 14;
           const y = centerY + Math.sin(angle * 1.3) * drift * 0.68;
-          const size = 1.2 + ((i % 5) / 5) * 4 + speakingLevel * 1.4 + band * 3.5;
+          const size = 1.2 + ((i % 5) / 5) * 4 + _speakingLevel * 1.4 + band * 3.5;
           ctx.beginPath();
           ctx.fillStyle = i % 3 === 0 ? '#9b8cff' : '#2af5ff';
           ctx.globalAlpha = 0.14 + ((i % 7) / 7) * 0.32 + band * 0.3;
@@ -427,8 +444,8 @@ function NeuralWave({
         const dots = 220;
         for (let i = 0; i < dots; i += 1) {
           const x = (i / (dots - 1)) * width;
-          const phase = i * 0.18 + t * (state === 'thinking' ? 5 : 8.8);
-          const band = bandAt(Math.floor((i / dots) * speechBands.length));
+          const phase = i * 0.18 + t * (_state === 'thinking' ? 5 : 8.8);
+          const band = bandAt(Math.floor((i / dots) * _speechBands.length));
           const mod = Math.sin(t * 2.1 + i * 0.05) * 0.4 + 0.7 + band * 0.8;
           const y = centerY + Math.sin(phase) * amp * mod;
           const size = 1.2 + ((Math.sin(phase * 1.8) + 1) / 2) * 3.1 + band * 2.2;
@@ -444,10 +461,10 @@ function NeuralWave({
       ctx.globalAlpha = 1;
       ctx.fillStyle = '#8fd7e6';
       ctx.font = '12px "Space Mono", monospace';
-      ctx.fillText(`STATE: ${state.toUpperCase()}`, 14, 24);
-      if (interimText) {
+      ctx.fillText(`STATE: ${_state.toUpperCase()}`, 14, 24);
+      if (_interimText) {
         ctx.fillStyle = '#9fb3c8';
-        ctx.fillText(`LISTENING: ${interimText.slice(0, 96)}`, 14, height - 14);
+        ctx.fillText(`LISTENING: ${_interimText.slice(0, 96)}`, 14, height - 14);
       }
 
       raf = requestAnimationFrame(draw);
@@ -459,14 +476,15 @@ function NeuralWave({
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [state, interimText, speakingLevel, visualizerMode, speechBands, speechMotion]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualizerMode]);
 
   return <canvas className="neural-wave" ref={canvasRef} aria-hidden />;
 }
 
 export function RunConsole({ onRunChange }: Props) {
   const [task, setTask] = useState('Tell me about your capabilities.');
-  const [mode, setMode] = useState<RunMode>('simulation');
+  const [mode] = useState<RunMode>('live');
   const [run, setRun] = useState<RunDetail | null>(null);
   const [events, setEvents] = useState<EventView[]>([]);
   const [loading, setLoading] = useState(false);
@@ -529,6 +547,7 @@ export function RunConsole({ onRunChange }: Props) {
   const followUpTimeoutRef = useRef<number | null>(null);
   const followUpAwaitingRef = useRef<{ agentId: string } | null>(null);
   const [activeAgentId, setActiveAgentId] = useState<string>('coordinator');
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const runStateLabel = useMemo(() => {
     if (brainState === 'listening') return 'Listening';
@@ -1552,18 +1571,6 @@ export function RunConsole({ onRunChange }: Props) {
     streamRef.current?.close();
     if (pollTimerRef.current) window.clearTimeout(pollTimerRef.current);
 
-    const coordinator = agentProfiles.coordinator;
-    const ack = 'One moment.';
-    void speak(ack, undefined, {
-      agentId: 'coordinator',
-      voice: (coordinator?.speech_voice as NeuralVoice | undefined) ?? neuralVoice,
-      profile: (coordinator?.speech_style as VoiceProfile | undefined) ?? 'precise',
-      persona: coordinator?.speech_persona,
-      premiumVoiceId: coordinator?.premium_voice_id,
-      transcriptRole: 'system',
-      autoListenAfterQuestion: false,
-    });
-
     try {
       const created = await startRun(launchTask, mode, conservativeSpecialistRouting);
       onRunChange(created.run_id, null);
@@ -1773,275 +1780,292 @@ export function RunConsole({ onRunChange }: Props) {
         <p className="muted">{runStateLabel}</p>
       </div>
 
-      {agentProfiles[activeAgentId] && (
-        <div className="agent-spotlight">
-          {isVisualAvatar(agentProfiles[activeAgentId].avatar || '') ? (
-            <img
-              className="agent-spotlight-video"
-              src={agentProfiles[activeAgentId].avatar}
-              alt={agentProfiles[activeAgentId].name}
-            />
-          ) : (
-            <div className="agent-spotlight-avatar">{agentProfiles[activeAgentId].avatar || '•'}</div>
-          )}
-          <div className="agent-spotlight-copy">
-            <strong>{agentProfiles[activeAgentId].name}</strong>
-            <span>{agentProfiles[activeAgentId].id}</span>
+      {/* --- HERO ZONE --- */}
+      <div className="hero-zone">
+        {agentProfiles[activeAgentId] && (
+          <div className="agent-spotlight">
+            {isVisualAvatar(agentProfiles[activeAgentId].avatar || '') ? (
+              <img
+                className="agent-spotlight-video"
+                src={agentProfiles[activeAgentId].avatar}
+                alt={agentProfiles[activeAgentId].name}
+              />
+            ) : (
+              <div className="agent-spotlight-avatar">{agentProfiles[activeAgentId].avatar || '•'}</div>
+            )}
+            <div className="agent-spotlight-copy">
+              <strong>{agentProfiles[activeAgentId].name}</strong>
+              <span>{agentProfiles[activeAgentId].id}</span>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <NeuralWave
-        state={brainState}
-        interimText={interimText}
-        speakingLevel={speakingLevel}
-        visualizerMode={visualizerMode}
-        speechBands={speechBands}
-        speechMotion={speechMotion}
-      />
+        <NeuralWave
+          state={brainState}
+          interimText={interimText}
+          speakingLevel={speakingLevel}
+          visualizerMode={visualizerMode}
+          speechBands={speechBands}
+          speechMotion={speechMotion}
+        />
 
-
-      <div className="template-rail">
-        {templates.map((template) => (
-          <button key={template.id} type="button" className="template-pill" onClick={() => applyTemplate(template)}>
-            <strong>{template.name}</strong>
-            <span>{template.description}</span>
+        <div className="voice-controls">
+          <button type="button" onClick={toggleListening} disabled={!speechSupported || loading}>
+            {isListening ? 'Stop Listening' : 'Start Listening'}
           </button>
-        ))}
+          <button type="button" onClick={stopAllSpeech}>Stop Speaking</button>
+          {pendingRemotePlayback && (
+            <button type="button" onClick={playPendingResponse}>Play Pending Response</button>
+          )}
+        </div>
       </div>
 
-      <div className="voice-controls">
-        <button type="button" onClick={toggleListening} disabled={!speechSupported || loading}>
-          {isListening ? 'Stop Listening' : 'Start Listening'}
+      {/* --- SETTINGS DRAWER --- */}
+      <div className="settings-drawer">
+        <button
+          type="button"
+          className="settings-toggle"
+          onClick={() => setSettingsOpen((o) => !o)}
+        >
+          Voice & Settings {settingsOpen ? '\u25BE' : '\u25B8'}
         </button>
-        <button type="button" onClick={stopAllSpeech}>Stop Speaking</button>
-        {pendingRemotePlayback && (
-          <button type="button" onClick={playPendingResponse}>Play Pending Response</button>
+        {settingsOpen && (
+          <div className="settings-drawer-body">
+            <div className="voice-profile-row">
+              <label>
+                Voice Engine
+                <select value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value as VoiceEngine)}>
+                  <option value="elevenlabs">Premium (ElevenLabs)</option>
+                  <option value="openai">Neural (OpenAI)</option>
+                  <option value="parler">Parler TTS (HF)</option>
+                  <option value="browser">Browser (local)</option>
+                </select>
+              </label>
+              <span className="muted small">
+                {voiceEngine === 'elevenlabs'
+                  ? `ElevenLabs: ${voiceProviderState.elevenlabs ?? 'unknown'}`
+                  : voiceEngine === 'openai'
+                    ? `OpenAI: ${voiceProviderState.openai ?? 'unknown'}`
+                    : voiceEngine === 'parler'
+                      ? `Parler: ${voiceProviderState.parler_tts ?? 'unknown'}`
+                      : 'Browser voice is local only'}
+              </span>
+            </div>
+
+            <div className="voice-profile-row">
+              <label>
+                Neural Voice
+                <select
+                  value={neuralVoice}
+                  onChange={(e) => {
+                    userVoiceOverrideRef.current = true;
+                    setNeuralVoice(e.target.value as NeuralVoice);
+                  }}
+                  disabled={voiceEngine !== 'openai'}
+                >
+                  <option value="alloy">alloy</option>
+                  <option value="ash">ash</option>
+                  <option value="coral">coral</option>
+                  <option value="sage">sage</option>
+                  <option value="shimmer">shimmer</option>
+                  <option value="verse">verse</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="voice-profile-row">
+              <label>
+                Visualizer
+                <select value={visualizerMode} onChange={(e) => setVisualizerMode(e.target.value as VisualizerMode)}>
+                  {VISUALIZER_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="voice-profile-row">
+              <label>
+                Speech Style
+                <select
+                  value={voiceProfile}
+                  onChange={(e) => {
+                    userVoiceOverrideRef.current = true;
+                    setVoiceProfile(e.target.value as VoiceProfile);
+                  }}
+                >
+                  <option value="natural">Natural</option>
+                  <option value="warm">Warm</option>
+                  <option value="energetic">Energetic</option>
+                  <option value="precise">Precise</option>
+                  <option value="cinematic">Cinematic</option>
+                </select>
+              </label>
+            </div>
+
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={liveNarration}
+                onChange={(e) => setLiveNarration(e.target.checked)}
+              />
+              Live narration during active runs
+            </label>
+
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={streamPreviewSpeech}
+                onChange={(e) => setStreamPreviewSpeech(e.target.checked)}
+              />
+              Stream preview speech before run completes
+            </label>
+
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={autoSilenceRun}
+                onChange={(e) => setAutoSilenceRun(e.target.checked)}
+              />
+              Auto-run after 1.5s silence
+            </label>
+
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={conservativeSpecialistRouting}
+                onChange={(e) => setConservativeSpecialistRouting(e.target.checked)}
+              />
+              Route specialists only on explicit name or strong intent
+            </label>
+
+            {!speechSupported && <p className="muted">Speech input is not supported in this browser.</p>}
+          </div>
         )}
       </div>
 
-      <div className="voice-profile-row">
-        <label>
-          Voice Engine
-          <select value={voiceEngine} onChange={(e) => setVoiceEngine(e.target.value as VoiceEngine)}>
-            <option value="elevenlabs">Premium (ElevenLabs)</option>
-            <option value="openai">Neural (OpenAI)</option>
-            <option value="parler">Parler TTS (HF)</option>
-            <option value="browser">Browser (local)</option>
-          </select>
-        </label>
-        <span className="muted small">
-          {voiceEngine === 'elevenlabs'
-            ? `ElevenLabs: ${voiceProviderState.elevenlabs ?? 'unknown'}`
-            : voiceEngine === 'openai'
-              ? `OpenAI: ${voiceProviderState.openai ?? 'unknown'}`
-              : voiceEngine === 'parler'
-                ? `Parler: ${voiceProviderState.parler_tts ?? 'unknown'}`
-                : 'Browser voice is local only'}
-        </span>
-      </div>
+      {/* --- MISSION AREA --- */}
+      <div className="mission-area">
+        <form onSubmit={onSubmit} className="form-grid">
+          <label>
+            Mission Prompt
+            <textarea value={task} onChange={(e) => setTask(e.target.value)} rows={3} required />
+          </label>
+          <button disabled={loading} type="submit">{loading ? 'Running Mission...' : 'Execute Mission'}</button>
+        </form>
 
-      <div className="voice-profile-row">
-        <label>
-          Neural Voice
-          <select
-            value={neuralVoice}
-            onChange={(e) => {
-              userVoiceOverrideRef.current = true;
-              setNeuralVoice(e.target.value as NeuralVoice);
-            }}
-            disabled={voiceEngine !== 'openai'}
-          >
-            <option value="alloy">alloy</option>
-            <option value="ash">ash</option>
-            <option value="coral">coral</option>
-            <option value="sage">sage</option>
-            <option value="shimmer">shimmer</option>
-            <option value="verse">verse</option>
-          </select>
-        </label>
-      </div>
+        <div className="template-rail">
+          {templates.map((template) => (
+            <button key={template.id} type="button" className="template-pill" onClick={() => applyTemplate(template)}>
+              <strong>{template.name}</strong>
+              <span>{template.description}</span>
+            </button>
+          ))}
+        </div>
 
-      <div className="voice-profile-row">
-        <label>
-          Visualizer
-          <select value={visualizerMode} onChange={(e) => setVisualizerMode(e.target.value as VisualizerMode)}>
-            {VISUALIZER_OPTIONS.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
+        <div className="template-save-bar">
+          <input value={templateName} onChange={(e) => setTemplateName(e.target.value)} placeholder="Save current prompt as template" />
+          <button type="button" onClick={saveTemplate}>Save Template</button>
+        </div>
+
+        {savedTemplates.length > 0 && (
+          <div className="saved-template-list">
+            {savedTemplates.map((template) => (
+              <div key={template.id} className="saved-template-row">
+                <span>{template.name}</span>
+                <button type="button" className="ghost-button" onClick={() => deleteTemplate(template.id)}>Delete</button>
+              </div>
             ))}
-          </select>
-        </label>
-      </div>
+          </div>
+        )}
 
-      <div className="voice-profile-row">
-        <label>
-          Speech Style
-          <select
-            value={voiceProfile}
-            onChange={(e) => {
-              userVoiceOverrideRef.current = true;
-              setVoiceProfile(e.target.value as VoiceProfile);
-            }}
-          >
-            <option value="natural">Natural</option>
-            <option value="warm">Warm</option>
-            <option value="energetic">Energetic</option>
-            <option value="precise">Precise</option>
-            <option value="cinematic">Cinematic</option>
-          </select>
-        </label>
-      </div>
-
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={liveNarration}
-          onChange={(e) => setLiveNarration(e.target.checked)}
-        />
-        Live narration during active runs
-      </label>
-
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={streamPreviewSpeech}
-          onChange={(e) => setStreamPreviewSpeech(e.target.checked)}
-        />
-        Stream preview speech before run completes
-      </label>
-
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={autoSilenceRun}
-          onChange={(e) => setAutoSilenceRun(e.target.checked)}
-        />
-        Auto-run after 1.5s silence
-      </label>
-
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={conservativeSpecialistRouting}
-          onChange={(e) => setConservativeSpecialistRouting(e.target.checked)}
-        />
-        Route specialists only on explicit name or strong intent
-      </label>
-
-      {!speechSupported && <p className="muted">Speech input is not supported in this browser.</p>}
-
-      <form onSubmit={onSubmit} className="form-grid">
-        <label>
-          Mission Prompt
-          <textarea value={task} onChange={(e) => setTask(e.target.value)} rows={3} required />
-        </label>
-        <label>
-          Mode
-          <select value={mode} onChange={(e) => setMode(e.target.value as RunMode)}>
-            <option value="simulation">simulation</option>
-            <option value="live">live</option>
-          </select>
-        </label>
-        <button disabled={loading} type="submit">{loading ? 'Running Mission...' : 'Execute Mission'}</button>
-      </form>
-
-      <div className="filter-chips">
-        <span className="chip active">Predicted Route: {predictedRoute.label}</span>
-      </div>
-
-      <div className="template-save-bar">
-        <input value={templateName} onChange={(e) => setTemplateName(e.target.value)} placeholder="Save current prompt as template" />
-        <button type="button" onClick={saveTemplate}>Save Template</button>
-      </div>
-
-      {savedTemplates.length > 0 && (
-        <div className="saved-template-list">
-          {savedTemplates.map((template) => (
-            <div key={template.id} className="saved-template-row">
-              <span>{template.name}</span>
-              <button type="button" className="ghost-button" onClick={() => deleteTemplate(template.id)}>Delete</button>
-            </div>
-          ))}
+        <div className="filter-chips">
+          <span className="chip active">Predicted Route: {predictedRoute.label}</span>
         </div>
-      )}
-
-      {run && (
-        <div className="status-card">
-          <h3>Run Status</h3>
-          <p><strong>ID:</strong> {run.run_id}</p>
-          <p><strong>Status:</strong> {run.status}</p>
-          <p><strong>Updated:</strong> {new Date(run.updated_at).toLocaleString()}</p>
-          {run.state?.route_decision && typeof run.state.route_decision === 'object' && (
-            <>
-              <p><strong>Actual Route:</strong> {String((run.state.route_decision as Record<string, unknown>).agent_id || 'coordinator')} · {String((run.state.route_decision as Record<string, unknown>).task_type || '')}</p>
-              <p className="muted small">{String((run.state.route_decision as Record<string, unknown>).reason || '')}</p>
-            </>
-          )}
-          {run.state?.run_metrics && typeof run.state.run_metrics === 'object' && (
-            <p><strong>Latency:</strong> {String((run.state.run_metrics as Record<string, unknown>).elapsed_ms || 0)} ms</p>
-          )}
-          {run.state?.policy_version && (
-            <p className="muted small">
-              Policy {String(run.state.policy_version)} · Prompt {String(run.state.prompt_version || '')}
-            </p>
-          )}
-          {Array.isArray(run.state?.warnings) && run.state.warnings.length > 0 && (
-            <div className="events" style={{ marginTop: 12 }}>
-              <h3>Warnings</h3>
-              <ul>
-                {run.state.warnings.map((warning, index) => (
-                  <li key={`${warning}-${index}`}>
-                    <p className="muted event-detail">{String(warning)}</p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {Array.isArray(run.state?.action_items) && run.state.action_items.length > 0 && (
-            <div className="events" style={{ marginTop: 12 }}>
-              <h3>Next Actions</h3>
-              <ul>
-                {run.state.action_items.map((item, index) => (
-                  <li key={`${String((item as Record<string, unknown>).type || index)}-${index}`}>
-                    <p className="muted event-detail">
-                      {String((item as Record<string, unknown>).owner || 'agent')}: {String((item as Record<string, unknown>).label || '')}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-
-      <div className="events">
-        <h3>Synaptic Stream</h3>
-        <ul>
-          {events.slice(0, 12).map((evt, idx) => (
-            <li key={idx}>
-              <p className="event-line">
-                <strong>{evt.node}</strong> <span>{evt.status}</span>
-              </p>
-              <p className="muted event-detail">{evt.detail}</p>
-            </li>
-          ))}
-        </ul>
       </div>
 
-      <div className="events">
-        <h3>Conversation</h3>
-        <ul>
-          {transcript.slice(0, 12).map((entry) => (
-            <li key={entry.id}>
-              <p className="event-line">
-                <strong>{entry.role}</strong> <span>{new Date(entry.ts).toLocaleTimeString()}</span>
+      {/* --- ACTIVITY AREA --- */}
+      <div className="activity-area">
+        {run && (
+          <div className="status-card">
+            <h3>Run Status</h3>
+            <p><strong>ID:</strong> {run.run_id}</p>
+            <p><strong>Status:</strong> {run.status}</p>
+            <p><strong>Updated:</strong> {new Date(run.updated_at).toLocaleString()}</p>
+            {run.state?.route_decision && typeof run.state.route_decision === 'object' && (
+              <>
+                <p><strong>Actual Route:</strong> {String((run.state.route_decision as Record<string, unknown>).agent_id || 'coordinator')} · {String((run.state.route_decision as Record<string, unknown>).task_type || '')}</p>
+                <p className="muted small">{String((run.state.route_decision as Record<string, unknown>).reason || '')}</p>
+              </>
+            )}
+            {run.state?.run_metrics && typeof run.state.run_metrics === 'object' && (
+              <p><strong>Latency:</strong> {String((run.state.run_metrics as Record<string, unknown>).elapsed_ms || 0)} ms</p>
+            )}
+            {run.state?.policy_version && (
+              <p className="muted small">
+                Policy {String(run.state.policy_version)} · Prompt {String(run.state.prompt_version || '')}
               </p>
-              <p className="event-detail">{entry.text}</p>
-            </li>
-          ))}
-        </ul>
+            )}
+            {Array.isArray(run.state?.warnings) && run.state.warnings.length > 0 && (
+              <div className="events" style={{ marginTop: 12 }}>
+                <h3>Warnings</h3>
+                <ul>
+                  {run.state.warnings.map((warning, index) => (
+                    <li key={`${warning}-${index}`}>
+                      <p className="muted event-detail">{String(warning)}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {Array.isArray(run.state?.action_items) && run.state.action_items.length > 0 && (
+              <div className="events" style={{ marginTop: 12 }}>
+                <h3>Next Actions</h3>
+                <ul>
+                  {run.state.action_items.map((item, index) => (
+                    <li key={`${String((item as Record<string, unknown>).type || index)}-${index}`}>
+                      <p className="muted event-detail">
+                        {String((item as Record<string, unknown>).owner || 'agent')}: {String((item as Record<string, unknown>).label || '')}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="activity-streams">
+          <div className="events">
+            <h3>Synaptic Stream</h3>
+            <ul>
+              {events.slice(0, 12).map((evt, idx) => (
+                <li key={idx}>
+                  <p className="event-line">
+                    <strong>{evt.node}</strong> <span>{evt.status}</span>
+                  </p>
+                  <p className="muted event-detail">{evt.detail}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="events">
+            <h3>Conversation</h3>
+            <ul>
+              {transcript.slice(0, 12).map((entry) => (
+                <li key={entry.id}>
+                  <p className="event-line">
+                    <strong>{entry.role}</strong> <span>{new Date(entry.ts).toLocaleTimeString()}</span>
+                  </p>
+                  <p className="event-detail">{entry.text}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
       </div>
     </section>
   );

@@ -54,7 +54,7 @@ export function SocialOpsPanel({ runId, run }: Props) {
     try {
       const payload = await resolveApproval(runId, approvalId, {
         action,
-        mode: (run?.mode ?? 'simulation') as RunMode,
+        mode: (run?.mode ?? 'live') as RunMode,
       });
       setSummary((current) => current ? { ...current, approvals: payload.approvals.filter((item: ApprovalItem) => item.kind === 'social_post') } : current);
       setOperatorNote(action === 'approve' ? 'Approval applied' : 'Queued post rejected');

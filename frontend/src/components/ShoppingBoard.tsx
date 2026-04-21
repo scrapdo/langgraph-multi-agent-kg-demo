@@ -63,7 +63,7 @@ export function ShoppingBoard({ runId, run }: Props) {
     try {
       const payload = await resolveApproval(runId, approvalId, {
         action,
-        mode: (run?.mode ?? 'simulation') as RunMode,
+        mode: (run?.mode ?? 'live') as RunMode,
       });
       setApprovals(payload.approvals.filter((item: ApprovalItem) => item.kind === 'shopping_lead'));
     } catch (err) {

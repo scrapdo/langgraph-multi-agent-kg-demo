@@ -747,8 +747,10 @@ Current diagnostics:
 - AI Influencer launch test
 
 Bridge code lives in:
-- [host_bridge/server.py](/Users/matt/Documents/new-project/host_bridge/server.py)
-- [host_bridge/README.md](/Users/matt/Documents/new-project/host_bridge/README.md)
+- [host_bridge/server.py](host_bridge/server.py)
+- [host_bridge/README.md](host_bridge/README.md)
+
+See [SECURITY.md](SECURITY.md) for the full threat model and the controls in place.
 
 
 ### Pricing status

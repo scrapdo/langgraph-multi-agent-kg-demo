@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
@@ -16,20 +19,73 @@ from app.agents.nodes import (
 from app.core.config import settings
 from app.graph.state import AgentState
 
+logger = logging.getLogger("app.workflow")
 
-def _dsn_for_langgraph() -> str:
+
+def _postgres_dsn_for_langgraph() -> str:
     # langgraph postgres saver expects psycopg URI scheme.
     return settings.postgres_dsn.replace("postgresql+psycopg://", "postgresql://")
 
 
-def build_checkpointer():
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver
+def _build_sqlite_checkpointer():
+    """Local-file checkpointer for native-app deployments (no Docker).
 
-        saver = PostgresSaver.from_conn_string(_dsn_for_langgraph())
-        saver.setup()
-        return saver
-    except Exception:
+    The workflow is invoked via ``ainvoke``, so we need the async variant.
+    AsyncSqliteSaver wraps aiosqlite and is drop-in compatible with the
+    checkpointer interface langgraph expects.
+    """
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    path = Path(settings.sqlite_checkpoint_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # AsyncSqliteSaver.from_conn_string returns an async context manager. We
+    # enter it manually so the saver stays alive for the process lifetime.
+    cm = AsyncSqliteSaver.from_conn_string(str(path))
+    # __aenter__ returns a coroutine; we need to run it. Use a tiny one-shot
+    # event loop since this happens once at graph-build time.
+    import asyncio as _asyncio
+
+    loop = _asyncio.new_event_loop()
+    try:
+        saver = loop.run_until_complete(cm.__aenter__())
+    finally:
+        loop.close()
+    # setup() on AsyncSqliteSaver is async too — same pattern.
+    loop2 = _asyncio.new_event_loop()
+    try:
+        loop2.run_until_complete(saver.setup())
+    finally:
+        loop2.close()
+    logger.info("langgraph async-sqlite checkpointer ready at %s", path)
+    return saver
+
+
+def build_checkpointer():
+    """Pick the durable checkpointer that matches the current deployment.
+
+    Priority:
+      1. Postgres, if ``postgres_dsn`` is set (legacy Docker stack).
+      2. SQLite file at ``sqlite_checkpoint_path`` (native-app default).
+      3. In-memory fallback (last resort, state lost on restart).
+    """
+    if settings.postgres_dsn:
+        try:
+            from langgraph.checkpoint.postgres import PostgresSaver
+
+            cm = PostgresSaver.from_conn_string(_postgres_dsn_for_langgraph())
+            # Newer langgraph versions return a context manager from from_conn_string.
+            # Support both shapes without branching on the library version.
+            saver = cm.__enter__() if hasattr(cm, "__enter__") else cm
+            saver.setup()
+            logger.info("langgraph postgres checkpointer ready")
+            return saver
+        except Exception as exc:
+            logger.warning("postgres checkpointer failed (%s); falling back to sqlite", exc)
+
+    try:
+        return _build_sqlite_checkpointer()
+    except Exception as exc:
+        logger.warning("sqlite checkpointer failed (%s); falling back to in-memory", exc)
         return MemorySaver()
 
 

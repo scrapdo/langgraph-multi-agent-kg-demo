@@ -33,11 +33,32 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
 
-export async function startRun(task: string, mode: RunMode, conservativeSpecialistRouting = false): Promise<RunResponse> {
+export type TaskTypeOverride =
+  | 'market_research'
+  | 'capabilities'
+  | 'conversation'
+  | 'shopping'
+  | 'social_media'
+  | 'secretary'
+  | 'news_brief'
+  | 'wellness_coaching';
+
+export async function startRun(
+  task: string,
+  mode: RunMode,
+  conservativeSpecialistRouting = false,
+  taskType?: TaskTypeOverride,
+): Promise<RunResponse> {
+  const body: Record<string, unknown> = {
+    task,
+    mode,
+    conservative_specialist_routing: conservativeSpecialistRouting,
+  };
+  if (taskType) body.task_type = taskType;
   const res = await fetch(`${API_BASE}/runs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task, mode, conservative_specialist_routing: conservativeSpecialistRouting }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Failed to start run: ${res.status}`);
   return res.json();
@@ -47,6 +68,27 @@ export async function getRun(runId: string): Promise<RunDetail> {
   const res = await fetch(`${API_BASE}/runs/${runId}`);
   if (!res.ok) throw new Error(`Failed to fetch run: ${res.status}`);
   return res.json();
+}
+
+export interface RunSummary {
+  run_id: string;
+  status: string;
+  title: string;
+  preview: string;
+  created_at: string;
+  updated_at: string;
+  elapsed_ms?: number | null;
+  estimated_total_tokens?: number | null;
+}
+
+export async function listRuns(limit = 50, query?: string, sessionId?: string): Promise<RunSummary[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (query && query.trim()) params.set('q', query.trim());
+  if (sessionId && sessionId.trim()) params.set('session_id', sessionId.trim());
+  const res = await fetch(`${API_BASE}/runs?${params.toString()}`);
+  if (!res.ok) throw new Error(`Failed to list runs: ${res.status}`);
+  const data = (await res.json()) as { runs: RunSummary[] };
+  return data.runs;
 }
 
 export async function getRunMemory(runId: string): Promise<RunMemoryResponse> {
@@ -179,6 +221,28 @@ export async function saveSecretaryContact(payload: SecretaryContactPreference) 
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || `Failed to save secretary contact: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface VisionDescribeResponse {
+  ok: boolean;
+  filename: string;
+  size: number;
+  content_type: string;
+  description: string;
+}
+
+export async function describeImage(file: File): Promise<VisionDescribeResponse> {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${API_BASE}/vision/describe`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Failed to describe image: ${res.status}`);
   }
   return res.json();
 }
@@ -523,6 +587,147 @@ export async function updateAgentProfiles(
   });
   if (!res.ok) throw new Error(`Failed to update agent profiles: ${res.status}`);
   return res.json();
+}
+
+export interface RealtimeSession {
+  /** Short-lived session id from OpenAI. */
+  id: string;
+  /** The model the session was provisioned against (e.g. gpt-4o-realtime-preview). */
+  model: string;
+  /** Ephemeral client secret — use as the Bearer for the WebRTC offer. */
+  client_secret: { value: string; expires_at?: number };
+  /** Agent catalog echoed back by the backend so the UI can label specialists. */
+  agents?: Record<string, { task_type: string; description: string }>;
+  /** Pass-through for anything else OpenAI returns (ice servers, etc). */
+  [key: string]: unknown;
+}
+
+export interface AppControlResult {
+  ok: boolean;
+  app: string;
+  action: string;
+  result: Record<string, unknown>;
+}
+
+export async function executeAppControl(
+  app: string,
+  action: string,
+  args?: Record<string, unknown>,
+): Promise<AppControlResult> {
+  const res = await fetch(`${API_BASE}/app-control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app, action, args: args ?? {} }),
+  });
+  if (!res.ok) {
+    let detail = `app-control ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch {
+      /* keep generic */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as AppControlResult;
+}
+
+export interface QuickLookupResult {
+  ok: boolean;
+  answer: string;
+  citations: string[];
+}
+
+export async function quickLookup(query: string): Promise<QuickLookupResult> {
+  const res = await fetch(`${API_BASE}/quick-lookup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) {
+    let detail = `quick-lookup ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as QuickLookupResult;
+}
+
+export interface ProactiveSchedule {
+  hour: number;
+  minute: number;
+  days: string[];
+  last_fired_on?: string | null;
+}
+
+export interface ProactiveTask {
+  id: string;
+  name: string;
+  prompt: string;
+  task_type?: string | null;
+  schedule: ProactiveSchedule;
+  run_count?: number;
+  last_run_at?: string | null;
+}
+
+export async function createProactiveTask(payload: {
+  name: string;
+  prompt: string;
+  hour: number;
+  minute: number;
+  days: string[];
+  task_type?: string;
+}): Promise<ProactiveTask> {
+  const res = await fetch(`${API_BASE}/proactive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let detail = `proactive ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail);
+  }
+  const body = (await res.json()) as { task: ProactiveTask };
+  return body.task;
+}
+
+export async function listProactiveTasks(): Promise<ProactiveTask[]> {
+  const res = await fetch(`${API_BASE}/proactive`);
+  if (!res.ok) throw new Error(`proactive list ${res.status}`);
+  const body = (await res.json()) as { tasks: ProactiveTask[] };
+  return body.tasks;
+}
+
+export async function deleteProactiveTask(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/proactive/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`proactive delete ${res.status}`);
+}
+
+export async function createRealtimeSession(): Promise<RealtimeSession> {
+  const res = await fetch(`${API_BASE}/realtime/session`, { method: 'POST' });
+  if (!res.ok) {
+    let detail = `Failed to create realtime session: ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch {
+      /* keep generic */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as RealtimeSession;
 }
 
 export function streamEvents(runId: string, onEvent: (event: Record<string, unknown>) => void): EventSource {

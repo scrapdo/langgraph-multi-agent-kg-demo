@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential_jitter
 
 from app.core.config import settings
+from app.core.streaming import chunk_content, publish_stream_end, publish_token
 from app.events.bus import event_bus
 from app.graph.state import AgentState
 from app.services.agent_profile_service import agent_profile_service
@@ -436,7 +437,7 @@ def _format_risk_flags(flags: list[str]) -> str:
 
 
 def _capability_spoken_response(mode: str) -> str:
-    mode_line = "I am currently in safe simulation mode." if mode == "simulation" else "I am currently in live execution mode for approved tools."
+    mode_line = "I am currently in live execution mode for approved tools."
     return (
         "I can run your coordinator, researcher, critic, and writer agents as one workflow. "
         "I keep long term memory in Zep, update a live Neo4j knowledge graph, and stream every step in real time. "
@@ -607,7 +608,7 @@ def _local_conversation_fallback(task: str) -> str:
         )
 
     if any(k in text for k in ["who are you", "what can you do", "capabilities"]):
-        return _capability_spoken_response("simulation")
+        return _capability_spoken_response("live")
 
     if any(k in text for k in ["what happens when", "when i ask", "when i talk to you"]):
         return (
@@ -642,6 +643,7 @@ async def _build_conversation_answer(state: AgentState) -> str:
 
     context_block = "\n".join(f"- {n}" for n in notes[:8])
     memory_block = "\n".join(memory_lines) if memory_lines else "- No relevant memory hits"
+    operator_profile = str(state.get("memory_context") or state.get("thread_context") or "").strip()
     writer_profile = _agent_voice_settings(state, "writer")
     speech_persona = writer_profile.get("speech_persona", "").strip()
 
@@ -653,11 +655,17 @@ async def _build_conversation_answer(state: AgentState) -> str:
         )
 
     llm = build_llm_for_agent("writer", temperature=0.35)
+    operator_block = (
+        f"Operator profile (for personalization only — never quote or restate it):\n{operator_profile}\n\n"
+        if operator_profile
+        else ""
+    )
     prompt = (
         "You are a normal conversational AI assistant inside a multi-agent system. "
         "Answer the user naturally, in plain English, with no template language and no repeated phrases. "
         "Keep it concise but clear, and directly answer the exact question.\n\n"
         f"Spoken persona:\n{speech_persona or 'Speak like a polished, natural human operator.'}\n\n"
+        f"{operator_block}"
         f"User question:\n{task}\n\n"
         f"System context:\n{context_block}\n\n"
         f"Memory context:\n{memory_block}\n\n"
@@ -665,9 +673,196 @@ async def _build_conversation_answer(state: AgentState) -> str:
         "1) Do not output a report format.\n"
         "2) Do not mention internal prompts.\n"
         "3) If asked how the system works, explain the pipeline step by step.\n"
-        "4) If unsure, say what you know and what is uncertain."
+        "4) If unsure, say what you know and what is uncertain.\n"
+        "5) Never start your response with filler phrases like 'Sure', 'Absolutely', "
+        "'Great question', 'I'd be happy to', 'Let me', 'As your', 'Of course', "
+        "'Here are', 'Here is', 'Well', 'So', 'Certainly', or 'Definitely'. "
+        "Begin immediately with the substance of your answer.\n"
+        "6) Write for spoken delivery: short sentences, no markdown, no bullet points, "
+        "no numbered lists. Sound like a natural person talking.\n"
+        "7) Never output anything inside [Operator profile ...] / [/Operator profile] "
+        "markers, and never paste the user question back into your answer verbatim."
     )
 
+    run_id = str(state.get("run_id") or "")
+    try:
+        parts: list[str] = []
+        async for chunk in llm.astream(prompt):
+            delta = chunk_content(chunk)
+            if not delta:
+                continue
+            parts.append(delta)
+            await publish_token(run_id, "writer", delta)
+        await publish_stream_end(run_id, "writer")
+        text = "".join(parts).strip()
+        if text:
+            return text
+    except Exception:
+        try:
+            response = await llm.ainvoke(prompt)
+            text = str(response.content).strip()
+            if text:
+                return text
+        except Exception:
+            pass
+
+    return _local_conversation_fallback(task)
+
+
+async def _openai_web_research(task: str, *, role_hint: str = "researcher") -> tuple[str, list[str]]:
+    """Run the task through OpenAI's Responses API with the built-in web_search tool.
+
+    Returns (answer_text, citation_urls). Shared by all specialists that can
+    benefit from live data lookups.
+    """
+    if not settings.openai_api_key:
+        return "", []
+
+    try:
+        from openai import AsyncOpenAI
+    except Exception:
+        return "", []
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url or None)
+    prompt = (
+        f"You are the {role_hint} on a multi-agent team. Use the web_search tool to find live, "
+        "up-to-date information and answer the EXACT question asked — no more, no less. "
+        "Do NOT deflect with 'check the official website'; actually look it up.\n\n"
+        "Output format (this is being SPOKEN ALOUD by a TTS):\n"
+        "- If the operator asked for 'current' or 'now' or 'today', give ONLY current/today. "
+        "Don't volunteer a forecast, a multi-day schedule, historical context, or adjacent info unless explicitly asked.\n"
+        "- Conversational prose. No markdown, no hashes, no bullet asterisks, no numbered lists "
+        "unless the question itself is clearly a list (e.g. 'list today's games'). For lists, keep under 4 items.\n"
+        "- Write numbers and units the way a person would speak them. "
+        "Examples: '53 degrees Fahrenheit' not '53F'. '21 degrees Celsius' not '21C'. "
+        "'2 p.m. Eastern' not '14:00 ET'. '$199' can stay but spell out 'percent' and 'degrees'.\n"
+        "- No inline URLs in parentheses — they get read aloud character-by-character. "
+        "If you must cite a source, just say the outlet name ('per ESPN') and skip the URL.\n"
+        "- Under 60 words for simple factual questions, under 180 for list answers. "
+        "No preamble, no filler openers ('Sure', 'Absolutely', 'Here is', 'Here are', 'Let me', 'Of course').\n"
+        "- Never invent personal facts about the operator — treat the question as standalone.\n\n"
+        f"Question: {task}"
+    )
+    try:
+        response = await client.responses.create(
+            model="gpt-4o",
+            tools=[{"type": "web_search"}],
+            input=prompt,
+        )
+    except Exception:
+        return "", []
+
+    text = (getattr(response, "output_text", "") or "").strip()
+
+    citations: list[str] = []
+    try:
+        for item in getattr(response, "output", []) or []:
+            for block in getattr(item, "content", []) or []:
+                for ann in getattr(block, "annotations", []) or []:
+                    url = getattr(ann, "url", None) or (ann.get("url") if isinstance(ann, dict) else None)
+                    if url and url not in citations:
+                        citations.append(url)
+    except Exception:
+        pass
+
+    return text, citations[:8]
+
+
+async def _specialist_live_answer(
+    state: AgentState,
+    agent_id: str,
+    role_description: str,
+    *,
+    use_web_search: bool,
+    include_operator_profile: bool,
+) -> str:
+    """Shared writer path for specialist handoffs: live web search + agent LLM + memory.
+
+    Every specialist branch routes through this instead of a hand-rolled template.
+    Benefits: consistent format (natural prose, no Request:/Task: scaffolding),
+    real live-data lookups via OpenAI's web_search tool, memory-aware answers
+    keyed to the agent's own persona + model.
+    """
+    task = state.get("task", "")
+    notes = state.get("research_notes", [])
+    tool_results = state.get("tool_results", [])
+    citations = state.get("citations", [])
+    mem_refs = state.get("memory_refs", []) or []
+
+    # 1) Live web lookup when the role benefits from fresh data.
+    if use_web_search and settings.openai_api_key:
+        live_answer, live_sources = await _openai_web_research(task, role_hint=agent_id)
+        if live_answer:
+            if live_sources:
+                merged = list(citations)
+                for url in live_sources:
+                    if url not in merged:
+                        merged.append(url)
+                state["citations"] = merged
+            return live_answer
+
+    # 2) Fall back to the agent's own LLM with its persona and available context.
+    if not settings.openai_api_key:
+        return (
+            "I don't have an answer generator configured right now, so I can't complete this. "
+            "Try again once the LLM provider is connected."
+        )
+
+    llm = build_llm_for_agent(agent_id, temperature=0.35)
+    agent_profile = _agent_voice_settings(state, agent_id)
+    persona = (agent_profile.get("speech_persona") or "").strip()
+    operator_profile = (
+        str(state.get("memory_context") or state.get("thread_context") or "").strip()
+        if include_operator_profile
+        else ""
+    )
+
+    memory_lines: list[str] = []
+    for ref in mem_refs[:4]:
+        summary = str(ref.get("summary") or "").strip()
+        if summary:
+            memory_lines.append(f"- {summary}")
+    memory_block = "\n".join(memory_lines) if memory_lines else "- (No past-conversation hits.)"
+
+    context_block = "\n".join(f"- {n}" for n in notes[:10]) or "- (No research notes gathered.)"
+
+    tool_block_lines: list[str] = []
+    for rec in tool_results[:6]:
+        if not isinstance(rec, dict):
+            continue
+        name = str(rec.get("tool") or "")
+        payload = rec.get("payload") or {}
+        if isinstance(payload, dict):
+            for item in (payload.get("items") or [])[:3]:
+                tool_block_lines.append(f"- [{name}] {item}")
+    tool_block = "\n".join(tool_block_lines) or "- (No tool outputs.)"
+
+    profile_line = (
+        f"Operator profile (use ONLY for subtle personalization — NEVER quote, restate, or echo this block):\n{operator_profile}\n\n"
+        if operator_profile
+        else ""
+    )
+    prompt = (
+        f"You are the {role_description} on a multi-agent operations team. "
+        f"Speak in this persona: {persona or 'warm, concise, confident, direct'}.\n\n"
+        "Answer the operator's question directly in natural prose. No form-letter headings, "
+        "no 'Request:' or 'Task:' scaffolding, no canned bullet templates. Use a clean list only if "
+        "the question itself calls for one (schedule, comparison, options).\n\n"
+        f"{profile_line}"
+        f"Operator's question:\n{task}\n\n"
+        f"Past-conversation memory:\n{memory_block}\n\n"
+        f"Research notes:\n{context_block}\n\n"
+        f"Tool outputs:\n{tool_block}\n\n"
+        "Rules:\n"
+        "1) Answer directly. Draw on the notes + tools + memory when helpful; when sparse, "
+        "use your domain knowledge and flag uncertainty honestly.\n"
+        "2) Never echo the question verbatim. Never output 'Task:', 'Request:', 'Findings:', "
+        "or similar scaffolding headings.\n"
+        "3) Never invent personal facts about the operator — if the profile doesn't say it, don't say it.\n"
+        "4) Begin with substance. No filler openers ('Sure', 'Absolutely', 'Here is', 'Here are', "
+        "'Let me', 'Of course', 'Great question').\n"
+        "5) Under 250 words unless the question genuinely requires more."
+    )
     try:
         response = await llm.ainvoke(prompt)
         text = str(response.content).strip()
@@ -676,59 +871,131 @@ async def _build_conversation_answer(state: AgentState) -> str:
     except Exception:
         pass
 
-    return _local_conversation_fallback(task)
+    return (
+        "I wasn't able to produce a useful answer for that one. "
+        "Try rephrasing, or ask me to hand it to a different specialist."
+    )
+
+
+async def _build_research_answer(state: AgentState) -> str:
+    """Compatibility wrapper — delegates to the shared specialist helper."""
+    return await _specialist_live_answer(
+        state,
+        "researcher",
+        "researcher focused on live data, comparisons, and multi-source synthesis",
+        use_web_search=True,
+        include_operator_profile=False,
+    )
+
+
+_SPOKEN_PREAMBLE_PATTERNS = [
+    # Role-specific openers
+    r"^(here(?:'s| are| is)\s+)",
+    r"^(i can handle that as your secretary\.\s*)",
+    r"^(i can coach this with you\.\s*)",
+    r"^(i completed the shopping scan\.\s*)",
+    r"^(i built the social media plan\.\s*)",
+    r"^(i completed the market brief\.\s*)",
+    r"^(i can help with that\.\s*)",
+    r"^(key findings are:\s*)",
+    r"^(the main angles are:\s*)",
+    r"^(the strongest options are\s*)",
+    # Generic LLM filler openers
+    r"^(absolutely[,!.\s]+)",
+    r"^(sure[,!.\s]+)",
+    r"^(of course[,!.\s]+)",
+    r"^(certainly[,!.\s]+)",
+    r"^(definitely[,!.\s]+)",
+    r"^(great question[,!.\s]+)",
+    r"^(good question[,!.\s]+)",
+    r"^(that'?s a (?:great|good|excellent|interesting|important) (?:question|point|topic)[,!.\s]+)",
+    r"^(i'?d be happy to\s+)",
+    r"^(i'd love to\s+)",
+    r"^(happy to (?:help|assist|explain)[,!.\s]+)",
+    r"^(glad you asked[,!.\s]+)",
+    r"^(let me\s+)",
+    r"^(so,?\s+)",
+    r"^(well,?\s+)",
+    r"^(okay,?\s+)",
+    r"^(alright,?\s+)",
+    r"^(right,?\s+)",
+    r"^(no problem[,!.\s]+)",
+    r"^(as your \w+[,.\s]+)",
+    r"^(as (?:a|an|the) \w+[,.\s]+)",
+    r"^(thanks for (?:asking|that|sharing|the question)[,!.\s]+)",
+]
+
+
+def _strip_spoken_preamble(text: str) -> str:
+    value = " ".join(str(text or "").split()).strip()
+    # Double pass: stripping one preamble can reveal another underneath
+    for _ in range(2):
+        for pattern in _SPOKEN_PREAMBLE_PATTERNS:
+            value = re.sub(pattern, "", value, flags=re.IGNORECASE)
+        value = value.strip()
+    return value + ("." if value and value[-1] not in ".!?" else "") if value else ""
+
+
+_MD_INLINE_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://)?[^)]+\)")
+_BARE_URL_RE = re.compile(r"\bhttps?://\S+")
+_INLINE_PAREN_URL_RE = re.compile(r"\s*\(\s*(?:https?://)?[^)\s]+\.[a-z]{2,}[^)]*\)")
+_MD_BULLET_RE = re.compile(r"^\s*(?:[-*•]\s+|\d+\.\s+)", flags=re.MULTILINE)
+_MD_HEADING_RE = re.compile(r"^\s*#{1,6}\s*", flags=re.MULTILINE)
+_MD_EMPHASIS_RE = re.compile(r"(\*\*|__|\*|_)(.+?)\1")
+# Match "53F", "53 F", "53°F", "53 °F", and "53 degrees F" — all become
+# "53 degrees Fahrenheit". \b on the trailing F/C stops us from matching
+# things like "Ford" or "Celsius" already-spelled-out.
+_DEGREES_F_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:°\s*|degrees?\s+)?F\b")
+_DEGREES_C_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:°\s*|degrees?\s+)?C\b")
+_DEGREE_SYMBOL_RE = re.compile(r"°")
+_PERCENT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+
+
+def _sanitize_for_speech(text: str) -> str:
+    """Rewrite text so a TTS engine speaks it like a human would read it aloud.
+
+    Covers the usual TTS failure modes: reading 'F' letter-by-letter after a
+    number, spelling out 'h-t-t-p-s-colon' for inline URLs, saying 'hash hash'
+    for markdown headings, 'asterisk asterisk' for bold, etc.
+    """
+    if not text:
+        return text
+
+    out = text
+
+    # Markdown links: keep the anchor text, drop the URL.
+    out = _MD_INLINE_LINK_RE.sub(r"\1", out)
+    # Freestanding URL dumps.
+    out = _BARE_URL_RE.sub("", out)
+    # "(example.com/foo)" style citations right after a phrase.
+    out = _INLINE_PAREN_URL_RE.sub("", out)
+
+    # Markdown scaffolding.
+    out = _MD_HEADING_RE.sub("", out)
+    out = _MD_BULLET_RE.sub("", out)
+    out = _MD_EMPHASIS_RE.sub(r"\2", out)
+
+    # Units / symbols. Order matters — handle the compound "° F" before the
+    # standalone degree symbol.
+    out = _DEGREES_F_RE.sub(r"\1 degrees Fahrenheit", out)
+    out = _DEGREES_C_RE.sub(r"\1 degrees Celsius", out)
+    out = _DEGREE_SYMBOL_RE.sub(" degrees", out)
+    out = _PERCENT_RE.sub(r"\1 percent", out)
+
+    # Collapse whitespace produced by the substitutions.
+    out = re.sub(r"[ \t]+", " ", out)
+    out = re.sub(r"\s+\n", "\n", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = out.strip()
+    return out
 
 
 async def _polish_spoken_response(state: AgentState, base_text: str, agent_id: str = "writer") -> str:
-    clean = " ".join(base_text.split())
+    clean = _sanitize_for_speech(base_text)
+    clean = " ".join(clean.split())
     if not clean:
         return clean
-
-    def _strip_spoken_preamble(text: str) -> str:
-        value = " ".join(str(text or "").split()).strip()
-        patterns = [
-            r"^(here(?:'s| are)\s+)",
-            r"^(i can handle that as your secretary\.\s*)",
-            r"^(i can coach this with you\.\s*)",
-            r"^(i completed the shopping scan\.\s*)",
-            r"^(i built the social media plan\.\s*)",
-            r"^(i completed the market brief\.\s*)",
-            r"^(i can help with that\.\s*)",
-            r"^(key findings are:\s*)",
-            r"^(the main angles are:\s*)",
-            r"^(the strongest options are\s*)",
-        ]
-        for pattern in patterns:
-            value = re.sub(pattern, "", value, flags=re.IGNORECASE)
-        return value.strip(" .") + ("." if value and value[-1] not in ".!?" else "")
-
-    clean = _strip_spoken_preamble(clean)
-
-    profile = _agent_voice_settings(state, agent_id)
-    persona = profile.get("speech_persona", "").strip()
-    style = profile.get("speech_style", "natural")
-
-    if not settings.openai_api_key:
-        return clean
-
-    llm = build_llm_for_agent(agent_id, temperature=0.35)
-    prompt = (
-        "Rewrite this text for spoken delivery. Keep the meaning intact, keep it concise, and make it sound like a normal human. "
-        "No markdown. No bullet points. No repeated ideas. Start directly with the substance.\n\n"
-        f"Persona: {persona or 'Polished human operator'}\n"
-        f"Speech style: {style}\n\n"
-        "Rules:\n"
-        "- Do not start with filler or framing like 'Here are', 'I can help', 'I completed', 'I built', 'Absolutely', 'Sure', or 'As your'.\n"
-        "- Assume the short acknowledgment already happened.\n"
-        "- Go straight to the answer.\n\n"
-        f"Text:\n{clean}"
-    )
-    try:
-        response = await llm.ainvoke(prompt)
-        polished = str(response.content).strip()
-        return _strip_spoken_preamble(polished or clean)
-    except Exception:
-        return clean
+    return _strip_spoken_preamble(clean)
 
 
 def _entity_type_for_name(name: str) -> str:
@@ -909,10 +1176,38 @@ async def coordinator_node(state: AgentState) -> AgentState:
         conservative = bool(state.get("conservative_specialist_routing", False))
         profiles = state.get("agent_profiles") or {}
         explicit_target = _explicit_agent_target(state["task"], profiles)
-        task_type = _detect_task_type_for_state(state["task"], profiles, conservative)
+        # Allow the frontend to pre-select the task type via the specialist channels.
+        forced_task_type = str(state.get("forced_task_type") or "").strip()
+        _ALLOWED_FORCED = {
+            "market_research",
+            "capabilities",
+            "conversation",
+            "shopping",
+            "social_media",
+            "secretary",
+            "news_brief",
+            "wellness_coaching",
+        }
+        if forced_task_type in _ALLOWED_FORCED:
+            task_type = forced_task_type
+        else:
+            task_type = _detect_task_type_for_state(state["task"], profiles, conservative)
         if task_type == "news_brief":
             state["news_mode"] = _detect_news_mode(state["task"])
-        fast_path = "conversation_direct" if task_type == "conversation" and _is_fast_conversation_candidate(state["task"]) else ""
+        # Fast paths: skip researcher + critic and go coordinator -> writer directly.
+        # - conversation_direct: short conversational exchanges where the writer LLM
+        #   answers on its own (existing behavior).
+        # - specialist_direct: any run that was FORCED to a specialist task_type by
+        #   the delegator. In those cases the writer's specialist branch already
+        #   calls _specialist_live_answer (live web search + agent LLM + memory),
+        #   which makes the researcher + critic nodes redundant latency. Cutting
+        #   them saves ~10-15s per handoff.
+        if task_type == "conversation" and _is_fast_conversation_candidate(state["task"]):
+            fast_path = "conversation_direct"
+        elif forced_task_type in _ALLOWED_FORCED and forced_task_type not in {"conversation", "capabilities"}:
+            fast_path = "specialist_direct"
+        else:
+            fast_path = ""
         route_agent = {
             "shopping": "shopper",
             "social_media": "social",
@@ -1242,21 +1537,29 @@ async def critic_node(state: AgentState) -> AgentState:
         reason = "Sufficient for output"
 
         if task_type == "market_research":
-            llm = build_llm_for_agent("critic", temperature=0)
-            prompt = (
-                "Evaluate this research for factuality and actionability. "
-                f"Task: {state['task']}\nNotes: {notes}\n"
-                "Return PASS or FAIL with one short reason."
-            )
-            try:
-                if settings.openai_api_key:
-                    response = await llm.ainvoke(prompt)
-                    text = str(response.content)
-                    if "FAIL" in text.upper():
-                        verdict = "FAIL"
-                    reason = text[:200]
-            except Exception:
-                critique_flags.append("llm_critic_error")
+            # Only run the LLM verdict when there are notes worth critiquing.
+            # If the research tools returned nothing (increasingly the norm —
+            # the stub market tool is deliberately empty), we let the writer
+            # answer from general knowledge and acknowledge the gap, rather
+            # than forcing the graph into its degraded fallback.
+            if notes:
+                llm = build_llm_for_agent("critic", temperature=0)
+                prompt = (
+                    "Evaluate this research for factuality and actionability. "
+                    f"Task: {state['task']}\nNotes: {notes}\n"
+                    "Return PASS or FAIL with one short reason."
+                )
+                try:
+                    if settings.openai_api_key:
+                        response = await llm.ainvoke(prompt)
+                        text = str(response.content)
+                        if "FAIL" in text.upper():
+                            verdict = "FAIL"
+                        reason = text[:200]
+                except Exception:
+                    critique_flags.append("llm_critic_error")
+            else:
+                reason = "No research notes to critique — deferring to writer."
 
         if verdict == "FAIL":
             critique_flags.append("critic_failed")
@@ -1297,7 +1600,7 @@ async def writer_node(state: AgentState) -> AgentState:
                 "- Maintain a live knowledge graph in Neo4j with run, thread, episode, claim, source, and tool lineage.\n"
                 "- Use Zep long-term memory and checkpointed short-term workflow memory.\n"
                 "- Stream mission-control telemetry: health, events, graph updates, and run status.\n"
-                "- Execute in simulation by default with optional live mode for whitelisted side effects.\n\n"
+                "- Execute approved side effects in live mode with whitelisted tools.\n\n"
                 "## Reliability Model\n"
                 "- Per-node retries with exponential backoff.\n"
                 "- Degraded fallback path on repeated failures.\n"
@@ -1365,145 +1668,74 @@ async def writer_node(state: AgentState) -> AgentState:
             action_items = [{"owner": "coordinator", "type": "news_follow_up", "label": "Ask for deeper coverage on one headline or switch to Baltimore-only news"}]
         elif task_type == "shopping":
             speaker_agent = "shopper"
-            top_notes = state.get("research_notes", [])[:4]
-            report = (
-                "# Private Shopper Brief\n\n"
-                f"Request: {state['task']}\n\n"
-                f"## Sourcing Plan\n{state.get('coordinator_plan', 'N/A')}\n\n"
-                "## Best Options\n"
-                + "\n".join(f"- {n}" for n in top_notes)
-                + "\n\n## Live Sources\n"
-                + "\n".join(
-                    f"- {item.get('title')} ({item.get('domain')})"
-                    for tool in state.get("tool_results", [])
-                    if tool.get("tool") == "shopping_search"
-                    for item in (tool.get("payload", {}).get("results", [])[:3] if isinstance(tool.get("payload"), dict) else [])
-                )
-                + "\n\n## Buying Guidance\n"
-                "- Prioritize verified sellers and clear return policies.\n"
-                "- Treat low-trust resale listings as higher risk.\n"
-                f"\n## Risk Review\n{_format_risk_flags(state.get('critique_flags', []))}\n\n"
-                "## Citations\n"
-                + "\n".join(f"- {c}" for c in state.get("citations", []))
-            )
-            spoken_response = await _polish_spoken_response(
+            shopper_answer = await _specialist_live_answer(
                 state,
-                (
-                    f"{('; '.join(top_notes[:3]) if top_notes else 'The options are still being narrowed down')}. "
-                    "I would prioritize trusted sellers and clear return windows before chasing the cheapest listing."
-                ),
-                speaker_agent,
+                "shopper",
+                "private shopper focused on product research, price comparisons, sourcing, and buying guidance",
+                use_web_search=True,
+                include_operator_profile=False,
             )
+            report = f"# Private Shopper Brief\n\n{shopper_answer}\n"
+            spoken_response = await _polish_spoken_response(state, shopper_answer, speaker_agent)
             action_items = [
                 {"owner": "shopper", "type": "approve_lead", "label": "Approve the best lead for follow-up"},
                 {"owner": "shopper", "type": "compare_risk", "label": "Compare seller trust and return policy before buying"},
             ]
         elif task_type == "social_media":
             speaker_agent = "social"
-            top_notes = state.get("research_notes", [])[:4]
-            report = (
-                "# Social Media Plan\n\n"
-                f"Request: {state['task']}\n\n"
-                f"## Campaign Plan\n{state.get('coordinator_plan', 'N/A')}\n\n"
-                "## Recommended Angles\n"
-                + "\n".join(f"- {n}" for n in top_notes)
-                + "\n\n## Platform Breakdown\n"
-                + "\n".join(
-                    f"- {n}" for n in state.get("research_notes", [])[4:8]
-                )
-                + "\n\n## Publishing Notes\n"
-                "- Build one core narrative, then adapt it per channel.\n"
-                "- Keep execution simulated unless live posting is explicitly allowed.\n"
-                f"\n## Risk Review\n{_format_risk_flags(state.get('critique_flags', []))}\n\n"
-                "## Citations\n"
-                + "\n".join(f"- {c}" for c in state.get("citations", []))
-            )
-            spoken_response = await _polish_spoken_response(
+            social_answer = await _specialist_live_answer(
                 state,
-                (
-                    f"{('; '.join(top_notes[:3]) if top_notes else 'The main angles are still being refined')}. "
-                    "I would keep the message consistent, then tailor hooks and cadence by platform."
-                ),
-                speaker_agent,
+                "social",
+                "social media strategist covering posts, campaigns, platform mix, timing, and content calendars",
+                use_web_search=True,
+                include_operator_profile=False,
             )
+            report = f"# Social Media Plan\n\n{social_answer}\n"
+            spoken_response = await _polish_spoken_response(state, social_answer, speaker_agent)
             action_items = [
                 {"owner": "social", "type": "queue_post", "label": "Queue one platform-specific post for approval"},
                 {"owner": "social", "type": "schedule_campaign", "label": "Set publishing cadence for the week"},
             ]
         elif task_type == "secretary":
             speaker_agent = "secretary"
-            report = (
-                "# Secretary Brief\n\n"
-                f"Request: {state['task']}\n\n"
-                f"## Plan\n{state.get('coordinator_plan', 'N/A')}\n\n"
-                "## Next Actions\n"
-                "- Confirm the contact, channel, and timing.\n"
-                "- Queue an approval-gated call, text, or email.\n"
-                "- Log the outreach result back into memory and the graph.\n"
-            )
-            spoken_response = await _polish_spoken_response(
+            secretary_answer = await _specialist_live_answer(
                 state,
-                "I will line up the call, text, or email flow and keep it approval-gated before anything goes out.",
-                speaker_agent,
+                "secretary",
+                "executive secretary handling calls, texts, emails, scheduling, follow-ups, inbox triage, and business/contact lookups",
+                use_web_search=True,
+                include_operator_profile=True,
             )
+            report = f"# Secretary Brief\n\n{secretary_answer}\n"
+            spoken_response = await _polish_spoken_response(state, secretary_answer, speaker_agent)
             action_items = [
                 {"owner": "secretary", "type": "confirm_contact", "label": "Confirm recipient and preferred channel"},
                 {"owner": "secretary", "type": "queue_outreach", "label": "Queue approval-gated outreach"},
             ]
         elif task_type == "wellness_coaching":
             speaker_agent = "wellness"
-            top_notes = state.get("research_notes", [])[:4]
-            report = (
-                "# Wellness Coach Brief\n\n"
-                f"Request: {state['task']}\n\n"
-                "## Focus Areas\n"
-                + "\n".join(f"- {n}" for n in top_notes)
-                + "\n\n## This Week's Structure\n"
-                "- Pick one daily anchor habit you can complete in under ten minutes.\n"
-                "- Set one movement target, one recovery target, and one stress-reduction target.\n"
-                "- Review adherence once at the end of the day instead of negotiating all day.\n"
-                "\n## Accountability Prompts\n"
-                "- What is today's smallest non-negotiable win?\n"
-                "- What is the one friction point I can remove before noon?\n"
-                "- If the day goes sideways, what is the reduced version that still counts?\n"
-            )
-            spoken_response = await _polish_spoken_response(
+            wellness_answer = await _specialist_live_answer(
                 state,
-                (
-                    "We will keep it practical: one anchor habit, one movement target, one recovery target, "
-                    "and a short daily accountability check so the plan is realistic enough to stick."
-                ),
-                speaker_agent,
+                "wellness",
+                "wellness coach helping with habits, goals, training, recovery, nutrition, and accountability",
+                use_web_search=True,
+                include_operator_profile=True,
             )
+            report = f"# Wellness Coach Brief\n\n{wellness_answer}\n"
+            spoken_response = await _polish_spoken_response(state, wellness_answer, speaker_agent)
             action_items = [
                 {"owner": "wellness", "type": "anchor_habit", "label": "Choose one daily anchor habit"},
                 {"owner": "wellness", "type": "movement_goal", "label": "Set one movement target for the week"},
                 {"owner": "wellness", "type": "recovery_goal", "label": "Set one sleep or recovery target"},
             ]
         else:
+            researcher_answer = await _build_research_answer(state)
             report = (
-                f"# Market Research Brief\n\n"
-                f"Task: {state['task']}\n\n"
-                f"## Plan\n{state.get('coordinator_plan', 'N/A')}\n\n"
-                f"## Findings\n"
-                + "\n".join(f"- {n}" for n in state.get("research_notes", []))
-                + "\n\n"
-                + f"## Risk Review\n{_format_risk_flags(state.get('critique_flags', []))}\n\n"
-                + f"## Citations\n"
-                + "\n".join(f"- {c}" for c in state.get("citations", []))
+                "# Research Brief\n\n"
+                f"{researcher_answer}\n"
             )
-            top_notes = state.get("research_notes", [])[:3]
-            spoken_findings = "; ".join(str(n) for n in top_notes) if top_notes else "No major movement detected"
-            spoken_response = await _polish_spoken_response(
-                state,
-                (
-                    f"{spoken_findings}. "
-                    f"Risk review is {_format_risk_flags(state.get('critique_flags', []))}."
-                ),
-                speaker_agent,
-            )
+            spoken_response = await _polish_spoken_response(state, researcher_answer, speaker_agent)
             action_items = [
-                {"owner": "coordinator", "type": "review_brief", "label": "Review the market brief and choose next action"},
+                {"owner": "coordinator", "type": "review_brief", "label": "Review the brief and choose next action"},
             ]
 
         await _emit_speech_preview(state, speaker_agent, spoken_response)
@@ -1606,15 +1838,24 @@ async def degraded_handler_node(state: AgentState) -> AgentState:
 
 
 def should_research_continue(state: AgentState) -> str:
+    # The degraded path is reserved for actual failures (force_degraded flag set
+    # by the retry-exhaustion handler). Sparse research notes are normal — many
+    # task_types deliberately produce few or zero notes (market_research uses a
+    # best-effort tool, conversation skips research entirely). The writer LLM
+    # handles thin context gracefully; we don't want to drop users into a
+    # canned "Degraded Result" just because the stub tools returned empty.
     if state.get("force_degraded"):
         return "degraded"
-    return "critic" if len(state.get("research_notes", [])) >= 2 else "degraded"
+    return "critic"
 
 
 def should_coordinator_route(state: AgentState) -> str:
     if state.get("force_degraded"):
         return "degraded"
-    if state.get("fast_path") == "conversation_direct":
+    # Both fast paths bypass researcher + critic. conversation_direct is the
+    # original small-talk shortcut; specialist_direct is the delegator-forced
+    # specialist handoff, where the writer does a live web search itself.
+    if state.get("fast_path") in {"conversation_direct", "specialist_direct"}:
         return "writer"
     return "researcher"
 

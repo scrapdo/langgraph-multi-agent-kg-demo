@@ -39,7 +39,7 @@ class DesktopScheduleRunner:
             schedule_id = str(schedule.get("schedule_id") or "")
             run_id = str(uuid4())
             workflow_kind = str(schedule.get("workflow_kind") or "morning_brief")
-            mode = str(schedule.get("mode") or "simulation")
+            mode = str(schedule.get("mode") or "live")
             approval_required = bool(schedule.get("approval_required", False))
             task = f"Scheduled desktop workflow: {workflow_kind}"
             thread_id = f"desktop-schedule:{schedule.get('schedule_id')}"
@@ -226,7 +226,7 @@ class DesktopScheduleRunner:
                         "Move your body for at least ten focused minutes",
                         "Protect tonight's sleep window",
                     ],
-                    "mode": str(schedule.get("mode") or "simulation"),
+                    "mode": str(schedule.get("mode") or "live"),
                     "outreach_enabled": workflow_kind == "wellness_outreach",
                     "outreach_channel": "telegram",
                     "outreach_provider": "auto",

@@ -1,4 +1,22 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _env_files() -> tuple[str, ...]:
+    # Project-tree config first (non-secrets), user-home secrets second.
+    # Later files override earlier ones, so secrets win.
+    candidates: list[str] = [".env"]
+    secrets_override = os.environ.get("KG_SECRETS_FILE")
+    if secrets_override:
+        candidates.append(secrets_override)
+    else:
+        home_secrets = Path.home() / ".config" / "kg-multi-agent" / "secrets.env"
+        candidates.append(str(home_secrets))
+    return tuple(path for path in candidates if Path(path).expanduser().is_file())
 
 
 class Settings(BaseSettings):
@@ -11,6 +29,10 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_tts_model: str = "gpt-4o-mini-tts"
     openai_tts_voice: str = "alloy"
+    # Delegator voice (OpenAI Realtime API). Options include: alloy, ash, ballad,
+    # coral, echo, sage, shimmer, verse. "ash" is warmer/more conversational than
+    # "alloy" — good match for the chief-of-staff persona.
+    openai_realtime_voice: str = "ash"
     tts_provider_default: str = "elevenlabs"
 
     anthropic_api_key: str = ""
@@ -54,17 +76,25 @@ class Settings(BaseSettings):
     zep_api_key: str = ""
     zep_base_url: str = "https://api.getzep.com"
 
-    neo4j_uri: str = "bolt://neo4j:7687"
+    # Neo4j is optional. Leave blank (default) and graph storage becomes a no-op;
+    # the app still runs, it just doesn't record the knowledge graph. Only the
+    # legacy Docker stack (which includes the neo4j container) sets this.
+    neo4j_uri: str = ""
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
 
-    postgres_dsn: str = "postgresql+psycopg://postgres:postgres@postgres:5432/agentdb"
-    redis_url: str = "redis://redis:6379/0"
+    # Postgres is optional. Leave blank (default) to use the SQLite checkpointer.
+    # Native-app builds ship without Postgres; only the legacy Docker stack sets this.
+    postgres_dsn: str = ""
+    # Local-file DB path for the LangGraph SQLite checkpointer when postgres_dsn is empty.
+    sqlite_checkpoint_path: str = "data/langgraph.sqlite3"
+    # Redis is optional too. Leave blank to run without Celery (in-process background tasks).
+    redis_url: str = ""
 
     max_revision_loops: int = 2
     node_timeout_seconds: int = 30
 
-    side_effect_default_mode: str = "simulation"
+    side_effect_default_mode: str = "live"
     side_effect_live_tools_csv: str = ""
     x_publish_webhook_url: str = ""
     x_publish_bearer_token: str = ""
@@ -116,7 +146,18 @@ class Settings(BaseSettings):
     browser_verify_ssl: bool = False
     playwright_headless: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    api_bearer_token: str = ""
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    model_config = SettingsConfigDict(
+        env_file=_env_files(),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
 
 settings = Settings()

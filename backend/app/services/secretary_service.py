@@ -363,7 +363,7 @@ class SecretaryService:
         to: str,
         message: str,
         subject: str = "",
-        mode: str = "simulation",
+        mode: str = "live",
         provider: str = "auto",
         contact_id: str = "",
     ) -> dict[str, Any]:
@@ -400,7 +400,7 @@ class SecretaryService:
         return {"status": "dispatched", "channel": channel, "to": to, "result": result}
 
     async def dispatch_wellness_outreach(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
-        mode = str(payload.get("mode") or "simulation").strip().lower()
+        mode = str(payload.get("mode") or "live").strip().lower()
         channel = str(payload.get("outreach_channel") or "telegram").strip().lower()
         provider = str(payload.get("outreach_provider") or "auto").strip().lower()
         message = str(payload.get("outreach_message") or payload.get("message") or "").strip()

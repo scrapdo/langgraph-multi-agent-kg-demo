@@ -1,0 +1,12 @@
+/*
+ * Style entry point. Ordering is deliberate — legacy rules come first so the
+ * new Tailwind/theme/base layers always override them for unmigrated panels.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap');
+
+@import "./legacy.css";
+@import "tailwindcss";
+@import "./theme.css";
+@import "./base.css";
+@import "./effects-hud.css";

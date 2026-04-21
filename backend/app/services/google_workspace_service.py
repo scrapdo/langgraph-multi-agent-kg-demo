@@ -170,6 +170,78 @@ class GoogleWorkspaceService:
             raise RuntimeError("Google Workspace is not connected.")
         return {"Authorization": f"Bearer {token}"}
 
+    def fetch_brief_data(self) -> dict[str, Any]:
+        """Return raw inbox + calendar data for the current moment.
+
+        Caller decides what to do with it — render markdown, inject into a
+        prompt, build a card, etc. Returns a structure with ``messages``,
+        ``events``, ``overlaps`` and a ``generated_at`` timestamp.
+        """
+        if not self.connected():
+            return {"connected": False, "messages": [], "events": [], "overlaps": [], "generated_at": None}
+        headers = self._headers()
+        now = datetime.now(timezone.utc)
+        time_min = now.isoformat().replace("+00:00", "Z")
+        messages: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        try:
+            with httpx.Client(timeout=20, headers=headers) as client:
+                list_resp = client.get(
+                    f"{self.base_gmail_url}/users/{settings.google_workspace_user}/messages",
+                    params={"maxResults": 10, "q": "in:inbox newer_than:2d"},
+                )
+                list_resp.raise_for_status()
+                for item in list_resp.json().get("messages", [])[:10]:
+                    msg_resp = client.get(
+                        f"{self.base_gmail_url}/users/{settings.google_workspace_user}/messages/{item['id']}",
+                        params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]},
+                    )
+                    msg_resp.raise_for_status()
+                    payload = msg_resp.json().get("payload", {})
+                    meta = {entry.get("name"): entry.get("value") for entry in payload.get("headers", [])}
+                    messages.append({
+                        "id": item["id"],
+                        "subject": meta.get("Subject", "(no subject)"),
+                        "from": meta.get("From", ""),
+                        "date": meta.get("Date", ""),
+                    })
+                cal_resp = client.get(
+                    f"{self.base_calendar_url}/calendars/{settings.google_calendar_id}/events",
+                    params={
+                        "maxResults": 10,
+                        "singleEvents": "true",
+                        "orderBy": "startTime",
+                        "timeMin": time_min,
+                        "timeMax": (now + timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+                    },
+                )
+                cal_resp.raise_for_status()
+                for event in cal_resp.json().get("items", [])[:10]:
+                    events.append({
+                        "summary": event.get("summary", "(untitled)"),
+                        "start": (event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date"),
+                        "end": (event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date"),
+                        "location": event.get("location") or "",
+                        "attendees": [
+                            (a.get("email") or "")
+                            for a in (event.get("attendees") or [])[:6]
+                            if not a.get("self")
+                        ],
+                    })
+        except httpx.HTTPStatusError as exc:
+            return {"connected": True, "error": f"Google API error: {exc.response.status_code}", "messages": [], "events": [], "overlaps": [], "generated_at": now.isoformat()}
+        except Exception as exc:
+            return {"connected": True, "error": str(exc), "messages": [], "events": [], "overlaps": [], "generated_at": now.isoformat()}
+
+        overlaps = self._detect_overlaps(events)
+        return {
+            "connected": True,
+            "messages": messages,
+            "events": events,
+            "overlaps": overlaps,
+            "generated_at": now.isoformat(),
+        }
+
     def snapshot(self, prompt: str, output_dir: Path, slug: str, action_type: str = "snapshot") -> Path:
         headers = self._headers()
         output_dir.mkdir(parents=True, exist_ok=True)

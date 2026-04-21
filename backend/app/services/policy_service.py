@@ -7,9 +7,7 @@ def live_tools() -> set[str]:
     return {x.strip() for x in settings.side_effect_live_tools_csv.split(',') if x.strip()}
 
 
-def can_execute_live(tool_name: str, mode: str) -> bool:
-    if mode != 'live':
-        return False
+def can_execute_live(tool_name: str, mode: str = "live") -> bool:  # noqa: ARG001 — mode kept for back-compat
     return tool_name in live_tools()
 
 
@@ -65,7 +63,7 @@ RISK_PROFILES: dict[str, dict[str, object]] = {
 }
 
 
-def evaluate_operation_risk(operation: str, *, mode: str = "simulation", approval_required: bool = False) -> dict[str, object]:
+def evaluate_operation_risk(operation: str, *, mode: str = "live", approval_required: bool = False) -> dict[str, object]:
     profile = RISK_PROFILES.get(operation, {
         "score": 25,
         "level": "low",
@@ -76,10 +74,7 @@ def evaluate_operation_risk(operation: str, *, mode: str = "simulation", approva
     level = str(profile["level"])
     reasons = list(profile["reasons"])  # type: ignore[arg-type]
     requires_approval = bool(profile["requires_approval"]) or approval_required
-    live_allowed = can_execute_live(operation, mode) if mode == "live" else False
-    if mode != "live":
-        score = max(5, score - 40)
-        reasons = ["Simulation mode lowers external risk."] + reasons
+    live_allowed = can_execute_live(operation, mode)
     return {
         "operation": operation,
         "mode": mode,

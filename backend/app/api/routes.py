@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Generator
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.responses import Response, StreamingResponse
 
 from app.core.config import settings
+from app.core.delegator import SPECIALIST_ROUTES, build_realtime_session_payload
 from app.events.bus import event_bus
+from app.services.app_control_service import AppControlError, app_control_service, list_actions as list_app_actions
 from app.models.schemas import (
     AgentProfilesPayload,
     AgentProfileUpdatePayload,
@@ -54,7 +57,13 @@ from app.services.policy_service import evaluate_operation_risk
 from app.services.run_service import create_run
 from app.services.scheduler_service import scheduler_service
 from app.services.secretary_service import secretary_service
+from app.services.chat_watchers_service import chat_watchers_service
+from app.services.event_watcher_service import event_watcher_service
+from app.services.fact_extraction_service import apply_proposals, extract_facts
+from app.services.proactive_nudge_service import proactive_nudge_service
 from app.services.tts_service import tts_service
+from app.services.user_profile_service import user_profile_service
+from app.services.workflow_template_service import workflow_template_service
 from app.tools.adapters import INSTAGRAM_PUBLISH_TOOL, LINKEDIN_PUBLISH_TOOL, X_PUBLISH_TOOL, score_shopping_domain
 
 router = APIRouter()
@@ -98,6 +107,7 @@ async def start_run(payload: RunRequest) -> RunResponse:
         user_id=payload.user_id,
         session_id=payload.session_id,
         conservative_specialist_routing=payload.conservative_specialist_routing,
+        forced_task_type=payload.task_type,
     )
     rec = run_store.get(run_id)
     return RunResponse(run_id=run_id, status=rec["status"] if rec else "queued")
@@ -109,6 +119,52 @@ async def get_run(run_id: str) -> RunDetail:
     if not rec:
         raise HTTPException(status_code=404, detail="Run not found")
     return RunDetail(**rec)
+
+
+@router.get("/runs")
+async def list_runs(
+    limit: int = Query(50, ge=1, le=200),
+    q: str | None = Query(None, description="Case-insensitive substring filter over task + output."),
+    session_id: str | None = Query(None, description="Restrict to runs whose state.session_id matches."),
+) -> dict:
+    """List recent runs newest-first for the conversation history sidebar."""
+    # Pull more than `limit` when filtering so the visible results don't starve.
+    rows = run_store.list(limit=limit if not (q or session_id) else limit * 4)
+    query = (q or "").strip().lower()
+    session_filter = (session_id or "").strip()
+    summaries = []
+    for rec in rows:
+        state = rec.get("state") or {}
+        task = str(rec.get("task") or "").strip()
+        # Strip the operator-profile preamble we inject in create_run so the
+        # history sidebar shows the user's actual question.
+        if task.startswith("[Operator profile"):
+            end = task.find("[/Operator profile]")
+            if end != -1:
+                task = task[end + len("[/Operator profile]"):].strip()
+        output = str(rec.get("output") or state.get("final_report") or "").strip()
+        if session_filter and str(state.get("session_id") or "") != session_filter:
+            continue
+        if query:
+            haystack = f"{task}\n{output}".lower()
+            if query not in haystack:
+                continue
+        first_line = task.splitlines()[0] if task else ""
+        title = first_line[:120] if first_line else "(empty)"
+        metrics = state.get("run_metrics") or {}
+        summaries.append({
+            "run_id": rec.get("run_id"),
+            "status": rec.get("status"),
+            "title": title,
+            "preview": (output or task)[:240],
+            "created_at": rec.get("created_at"),
+            "updated_at": rec.get("updated_at"),
+            "elapsed_ms": metrics.get("elapsed_ms"),
+            "estimated_total_tokens": metrics.get("estimated_total_tokens"),
+        })
+        if len(summaries) >= limit:
+            break
+    return {"runs": summaries}
 
 
 @router.get("/scheduler", response_model=SchedulerDashboardResponse)
@@ -270,7 +326,7 @@ async def get_run_report(run_id: str) -> HTMLResponse:
     )
     task = str(rec.get("task") or "Untitled run")
     status = str(rec.get("status") or "unknown")
-    mode = str(rec.get("mode") or "simulation")
+    mode = str(rec.get("mode") or "live")
     updated_at = rec.get("updated_at")
     html = f"""
     <!doctype html>
@@ -317,6 +373,70 @@ async def get_run_report(run_id: str) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+_VISION_MAX_BYTES = 10 * 1024 * 1024  # 10 MiB cap
+_VISION_ALLOWED_CT = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/heic", "image/heif")
+
+
+@router.post("/vision/describe")
+async def vision_describe(file: UploadFile = File(...)) -> dict:
+    """Accept an image file, return a plain-text description using an OpenAI vision model.
+
+    Used by the frontend's drag-and-drop attachment flow so that images become
+    real context the agent workflow can read — not just attached tokens.
+    """
+    import base64
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(content) > _VISION_MAX_BYTES:
+        raise HTTPException(status_code=413, detail=f"Image larger than {_VISION_MAX_BYTES // (1024 * 1024)} MiB.")
+    ct = (file.content_type or "").lower()
+    if not ct.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image/* content types are supported.")
+    if ct not in _VISION_ALLOWED_CT:
+        # Still allow but warn — modern OpenAI vision handles most image types.
+        pass
+
+    try:
+        from app.services.model_router_service import build_llm
+
+        b64 = base64.b64encode(content).decode("ascii")
+        data_url = f"data:{ct or 'image/png'};base64,{b64}"
+        llm = build_llm("openai", "gpt-4o-mini", temperature=0.2)
+        response = await llm.ainvoke(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You describe user-uploaded images for a personal AI assistant. "
+                        "Be concrete and specific: what is in the image, any readable text, "
+                        "notable numbers/dates, and anything an assistant would need to answer "
+                        "follow-up questions. 3-5 sentences. No preamble."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this image."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ]
+        )
+        description = str(getattr(response, "content", "") or "").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Vision provider failed: {exc}") from exc
+
+    return {
+        "ok": True,
+        "filename": file.filename,
+        "size": len(content),
+        "content_type": ct,
+        "description": description or "(no description returned)",
+    }
+
+
 @router.post("/documents/process", response_model=DocumentProcessResponse)
 async def process_document(file: UploadFile = File(...)) -> DocumentProcessResponse:
     raw = await file.read()
@@ -337,6 +457,248 @@ async def stream_events(run_id: str) -> StreamingResponse:
             event_bus.unsubscribe(run_id, queue)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/quick-lookup")
+async def quick_lookup(payload: dict) -> dict:
+    """Fast single-turn web lookup for the delegator.
+
+    The delegator uses this for weather, scores, open/closed, one-fact questions —
+    anything where spinning up the full LangGraph + a specialist ElevenLabs voice
+    would be overkill. The answer comes back as plain text the delegator speaks
+    in its own Realtime voice.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required")
+
+    # Reuse the same web-search helper the researcher uses, but label it for
+    # the delegator so the prompt calibrates toward terse one-or-two-sentence answers.
+    from app.agents.nodes import _openai_web_research  # local import avoids circular at module load
+
+    answer, citations = await _openai_web_research(query, role_hint="delegator")
+    if not answer:
+        raise HTTPException(status_code=502, detail="quick_lookup: no answer returned")
+    return {"ok": True, "answer": answer, "citations": citations}
+
+
+_DAY_TOKEN_TO_INDEX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+@router.post("/proactive")
+async def create_proactive_task(payload: dict) -> dict:
+    """Create a recurring proactive task. Backed by the workflow template scheduler."""
+    from app.services.workflow_template_service import workflow_template_service
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+    name = str(payload.get("name") or "").strip()
+    prompt = str(payload.get("prompt") or "").strip()
+    try:
+        hour = int(payload.get("hour"))
+        minute = int(payload.get("minute"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="hour and minute must be integers")
+    days_raw = payload.get("days") or []
+    task_type = payload.get("task_type") or None
+
+    if not name or not prompt:
+        raise HTTPException(status_code=400, detail="'name' and 'prompt' are required")
+    if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+        raise HTTPException(status_code=400, detail="hour 0-23, minute 0-59")
+    if not isinstance(days_raw, list) or not days_raw:
+        raise HTTPException(status_code=400, detail="days must be a non-empty array")
+    days: list[int] = []
+    for token in days_raw:
+        idx = _DAY_TOKEN_TO_INDEX.get(str(token).strip().lower())
+        if idx is None:
+            raise HTTPException(status_code=400, detail=f"unknown day token: {token!r}")
+        if idx not in days:
+            days.append(idx)
+
+    template = workflow_template_service.create(
+        {
+            "name": name,
+            "description": f"Proactive task created by the delegator. Fires {','.join(sorted(str(d) for d in days))} at {hour:02d}:{minute:02d}.",
+            "prompt": prompt,
+            "task_type": task_type,
+            "tags": ["proactive"],
+            "schedule": {
+                "enabled": True,
+                "hour": hour,
+                "minute": minute,
+                "days": days,
+                "skip_if_missing_required": True,
+            },
+        }
+    )
+    return {"ok": True, "task": _proactive_view(template)}
+
+
+@router.get("/proactive")
+async def list_proactive_tasks() -> dict:
+    from app.services.workflow_template_service import workflow_template_service
+
+    tasks = [
+        _proactive_view(t)
+        for t in workflow_template_service.list_templates()
+        if (t.get("schedule") or {}).get("enabled")
+        or "proactive" in (t.get("tags") or [])
+    ]
+    return {"ok": True, "tasks": tasks}
+
+
+@router.delete("/proactive/{task_id}")
+async def delete_proactive_task(task_id: str) -> dict:
+    from app.services.workflow_template_service import workflow_template_service
+
+    try:
+        workflow_template_service.delete(task_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="proactive task not found")
+    return {"ok": True}
+
+
+def _proactive_view(template: dict) -> dict:
+    schedule = template.get("schedule") or {}
+    day_tokens = [
+        ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][int(d)]
+        for d in (schedule.get("days") or [])
+        if isinstance(d, (int, float)) and 0 <= int(d) <= 6
+    ]
+    return {
+        "id": template.get("id"),
+        "name": template.get("name"),
+        "prompt": template.get("prompt"),
+        "task_type": template.get("task_type"),
+        "schedule": {
+            "hour": int(schedule.get("hour") or 0),
+            "minute": int(schedule.get("minute") or 0),
+            "days": day_tokens,
+            "last_fired_on": schedule.get("last_fired_on"),
+        },
+        "run_count": int(template.get("run_count") or 0),
+        "last_run_at": template.get("last_run_at"),
+    }
+
+
+@router.get("/app-control/actions")
+async def app_control_actions() -> dict:
+    """Return the catalog of (app, action) pairs the delegator can invoke."""
+    return {
+        "actions": list_app_actions(),
+        "host_bridge_configured": bool(settings.host_automation_base_url),
+    }
+
+
+@router.post("/app-control")
+async def app_control(payload: dict) -> dict:
+    """Execute a single (app, action, args) against the host bridge.
+
+    The delegator's ``control_app`` tool routes here. We never accept raw
+    AppleScript — the action must map to a pre-registered dispatcher in
+    ``app_control_service``, which validates args and talks to the hardened
+    host bridge (bearer-token auth, argv-parameterized AppleScript).
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+    app_name = str(payload.get("app") or "").strip()
+    action = str(payload.get("action") or "").strip()
+    raw_args = payload.get("args")
+    # Tolerance: some LLMs pass the action args inline at the top level
+    # instead of inside an `args` wrapper. Merge both shapes.
+    merged_args: dict[str, Any] = {}
+    if isinstance(raw_args, dict):
+        merged_args.update(raw_args)
+    for k, v in payload.items():
+        if k not in {"app", "action", "args"} and not isinstance(v, (dict, list)):
+            # Only pull scalar siblings — ignore nested objects to avoid surprises.
+            merged_args.setdefault(k, v)
+    if not app_name or not action:
+        # Include the received payload keys so the UI and delegator see what went wrong.
+        raise HTTPException(
+            status_code=400,
+            detail=f"app and action are required (received keys: {sorted(payload.keys())})",
+        )
+    try:
+        result = await app_control_service.execute(app_name, action, merged_args)
+    except AppControlError as exc:
+        # Log the sanitized call so we can see what the delegator actually sent.
+        import logging
+
+        logging.getLogger("app.api").warning(
+            "app-control rejected",
+            extra={
+                "app": app_name,
+                "action": action,
+                "arg_keys": sorted(merged_args.keys()),
+                "error": str(exc),
+            },
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"{exc} (received arg keys: {sorted(merged_args.keys())})",
+        ) from exc
+    return {"ok": True, "app": app_name, "action": action, "result": result}
+
+
+@router.post("/realtime/session")
+async def create_realtime_session() -> dict:
+    """Mint a short-lived OpenAI Realtime session the browser can use to open a WebRTC connection.
+
+    The browser never sees the long-lived API key. The ephemeral ``client_secret``
+    returned here is valid for about a minute and is scoped to a single session.
+    """
+    if not settings.openai_api_key:
+        raise HTTPException(status_code=503, detail="OpenAI not configured")
+
+    import httpx  # Local import — httpx is already in the backend dep set.
+    from app.services.user_profile_service import user_profile_service
+
+    model = "gpt-4o-realtime-preview"
+    # "ash" is the warmer, more conversational OpenAI Realtime voice — less flat
+    # than alloy, still unmistakably human, lands well for a "chief of staff"
+    # persona. Swap via OPENAI_REALTIME_VOICE if you want to try others (sage,
+    # coral, ballad, verse).
+    voice = (getattr(settings, "openai_realtime_voice", "") or "ash").strip() or "ash"
+
+    try:
+        operator_profile = user_profile_service.render_context()
+    except Exception:
+        operator_profile = ""
+
+    payload = build_realtime_session_payload(
+        model=model,
+        voice=voice,
+        operator_profile=operator_profile,
+    )
+
+    url = f"{settings.openai_base_url.rstrip('/')}/realtime/sessions"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                    # Realtime sessions endpoint needs the beta opt-in header.
+                    "OpenAI-Beta": "realtime=v1",
+                },
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Realtime session upstream error: {exc}") from exc
+
+    if res.status_code >= 400:
+        raise HTTPException(status_code=res.status_code, detail=f"OpenAI realtime: {res.text[:400]}")
+
+    data = res.json()
+    # Echo back the agent map so the frontend can label specialists without
+    # re-hardcoding it. Small, stable, and convenient.
+    data["agents"] = SPECIALIST_ROUTES
+    return data
 
 
 @router.get("/runs/{run_id}/memory", response_model=RunMemoryResponse)
@@ -530,7 +892,7 @@ async def resolve_approval(run_id: str, approval_id: str, payload: dict):
     rec = _get_run_or_404(run_id)
     state = rec.get("state") or {}
     action = str(payload.get("action") or "").strip().lower()
-    mode = str(payload.get("mode") or rec.get("mode") or "simulation")
+    mode = str(payload.get("mode") or rec.get("mode") or "live")
     approvals = _get_approvals(state)
     approval = next((item for item in approvals if item.get("approval_id") == approval_id), None)
     if not approval:
@@ -556,7 +918,7 @@ async def resolve_approval(run_id: str, approval_id: str, payload: dict):
             updated["executed"] = bool(result.payload.get("executed"))
             updated["simulated"] = bool(result.payload.get("simulated", True))
             updated["notes"] = list(updated.get("notes") or []) + [
-                "Live publish executed" if updated["executed"] else "Approved and retained in simulation mode",
+                "Live publish executed" if updated["executed"] else "Approved, pending execution.",
             ]
 
     saved = run_store.update_state(run_id, lambda current: _replace_approval(current, approval_id, updated))
@@ -657,7 +1019,7 @@ async def publish_social(run_id: str, payload: dict):
     rec = _get_run_or_404(run_id)
     platform = str(payload.get("platform") or "").strip().lower()
     message = str(payload.get("message") or (rec.get("output") or "")).strip()
-    mode = str(payload.get("mode") or rec.get("mode") or "simulation")
+    mode = str(payload.get("mode") or rec.get("mode") or "live")
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
     tool = {
@@ -742,7 +1104,7 @@ async def dispatch_secretary_action(payload: dict):
     to = str(payload.get("to") or "").strip()
     message = str(payload.get("message") or "").strip()
     subject = str(payload.get("subject") or "").strip()
-    mode = str(payload.get("mode") or "simulation").strip().lower()
+    mode = str(payload.get("mode") or "live").strip().lower()
     provider = str(payload.get("provider") or "auto").strip().lower()
     contact_id = str(payload.get("contact_id") or "").strip()
     if channel not in {"auto", "call", "sms", "email", "telegram"}:
@@ -803,6 +1165,12 @@ async def test_desktop_bridge_kind(kind: str):
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=str(result.get("detail") or "Bridge check failed"))
     return result
+
+
+@router.get("/workspace/morning-brief-context")
+async def workspace_morning_brief_context() -> dict:
+    """Return real Gmail inbox + Calendar upcoming events for the morning brief prompt."""
+    return google_workspace_service.fetch_brief_data()
 
 
 @router.get("/google/oauth/status")
@@ -1282,7 +1650,10 @@ async def run_speech(
         raise HTTPException(status_code=404, detail="Run not found")
 
     state = rec.get("state") or {}
-    raw = state.get("spoken_response") or rec.get("output") or rec.get("task")
+    # Only speak the run's actual output, never the input task. The task text is
+    # prefixed with the operator profile for personalisation, and we must never
+    # read that aloud (it would leak private user context as if it were the answer).
+    raw = state.get("spoken_response") or state.get("final_report") or rec.get("output")
     text = str(raw or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="No speech text available for this run")
@@ -1313,6 +1684,716 @@ async def run_speech(
     else:
         media_type = "audio/mpeg" if fmt == "mp3" else "audio/wav"
     return Response(content=audio, media_type=media_type, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/profile")
+async def get_user_profile() -> dict:
+    return {"profile": user_profile_service.get()}
+
+
+@router.put("/profile")
+async def update_user_profile(payload: dict) -> dict:
+    cleaned = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Profile payload must be an object.")
+    allowed = ("name", "role", "timezone", "location", "goals", "preferences", "current_focus", "notes")
+    for key in allowed:
+        if key in payload:
+            cleaned[key] = payload[key]
+    return {"profile": user_profile_service.save(cleaned)}
+
+
+@router.post("/profile/reset")
+async def reset_user_profile() -> dict:
+    return {"profile": user_profile_service.reset()}
+
+
+@router.post("/profile/remember")
+async def remember_fact(payload: dict) -> dict:
+    """Manually append a single fact to the operator's profile notes."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    fact = str(payload.get("fact") or "").strip()
+    if not fact:
+        raise HTTPException(status_code=400, detail="'fact' is required.")
+    current = user_profile_service.get()
+    existing = str(current.get("notes") or "").strip()
+    bullet = f"- {fact}"
+    updated = user_profile_service.save({"notes": f"{existing}\n{bullet}".strip() if existing else bullet})
+    return {"profile": updated}
+
+
+@router.post("/profile/extract")
+async def extract_and_apply_facts(payload: dict) -> dict:
+    """Run the LLM fact-extractor on a conversation turn.
+
+    Returns a proposal object. When ``apply=true``, also merges it into the
+    profile and returns the updated profile alongside.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    user_task = str(payload.get("user_task") or "").strip()
+    assistant_output = str(payload.get("assistant_output") or "").strip()
+    if not user_task or not assistant_output:
+        raise HTTPException(status_code=400, detail="Both 'user_task' and 'assistant_output' are required.")
+    proposal = await extract_facts(user_task, assistant_output)
+    response: dict = {"proposal": proposal}
+    if payload.get("apply"):
+        response["profile"] = apply_proposals(proposal.get("proposals") or {})
+    return response
+
+
+@router.post("/profile/apply-proposals")
+async def apply_proposal_payload(payload: dict) -> dict:
+    """Apply a previously-returned proposal to the profile."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    proposals = payload.get("proposals") or {}
+    if not isinstance(proposals, dict):
+        raise HTTPException(status_code=400, detail="'proposals' must be an object.")
+    return {"profile": apply_proposals(proposals)}
+
+
+# -----------------------------------------------------------------------------
+# B10 — Browser bookmarklet. Called from any webpage the operator is viewing,
+# so CORS must be fully open on this one endpoint. The request body is
+# text/plain JSON to avoid triggering a CORS preflight in the bookmarklet.
+# -----------------------------------------------------------------------------
+
+_BOOKMARKLET_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type",
+    "Access-Control-Max-Age": "600",
+}
+
+
+@router.options("/ask-about-page")
+async def ask_about_page_preflight() -> Response:
+    return Response(status_code=204, headers=_BOOKMARKLET_CORS_HEADERS)
+
+
+@router.post("/ask-about-page")
+async def ask_about_page(request: Request) -> JSONResponse:
+    """Start a run about a web page the operator is currently reading.
+
+    Payload (JSON, either content-type JSON or text/plain wrapping JSON):
+      - url:       page URL (required)
+      - title:     page title (optional)
+      - selection: highlighted text on the page (optional)
+      - question:  specific question about the page (optional; default: summarise)
+    """
+    body_bytes = await request.body()
+    payload: dict
+    try:
+        payload = json.loads(body_bytes.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"detail": f"Invalid JSON: {exc}"}, status_code=400, headers=_BOOKMARKLET_CORS_HEADERS)
+    if not isinstance(payload, dict):
+        return JSONResponse({"detail": "Payload must be an object."}, status_code=400, headers=_BOOKMARKLET_CORS_HEADERS)
+
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"detail": "'url' is required."}, status_code=400, headers=_BOOKMARKLET_CORS_HEADERS)
+    title = str(payload.get("title") or "").strip()
+    selection = str(payload.get("selection") or "").strip()
+    question = str(payload.get("question") or "").strip() or "Summarise this page and surface the three things most worth my attention."
+
+    context_parts = [f"Page URL: {url}"]
+    if title:
+        context_parts.append(f"Page title: {title}")
+    if selection:
+        context_parts.append(f"Selected text from the page:\n\n\"\"\"\n{selection[:6000]}\n\"\"\"")
+    task = f"{question}\n\n" + "\n".join(context_parts)
+
+    run_id = create_run(
+        task=task,
+        mode="live",
+        user_id="local",
+        session_id="bookmarklet",
+        conservative_specialist_routing=False,
+    )
+    return JSONResponse({"ok": True, "run_id": run_id}, headers=_BOOKMARKLET_CORS_HEADERS)
+
+
+@router.get("/bookmarklet")
+async def bookmarklet_snippet() -> dict:
+    """Return a ready-to-paste bookmarklet that sends the current page to the brain."""
+    # Keep the JS tight — it must fit on a single bookmark line.
+    js = (
+        "javascript:(()=>{"
+        "const d=JSON.stringify({url:location.href,title:document.title,selection:getSelection().toString()});"
+        "fetch('http://127.0.0.1:8000/ask-about-page',{method:'POST',headers:{'Content-Type':'text/plain'},body:d})"
+        ".then(r=>r.json()).then(j=>{"
+        "const t=document.createElement('div');"
+        "t.textContent='Sent to brain — run '+String(j.run_id||'').slice(0,8);"
+        "t.style.cssText='position:fixed;top:16px;right:16px;z-index:2147483647;padding:10px 14px;background:#29d8ff;color:#041014;border-radius:10px;"
+        "font:600 13px -apple-system,system-ui,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,0.3)';"
+        "document.body.appendChild(t);setTimeout(()=>t.remove(),2500);"
+        "}).catch(e=>alert('Brain unreachable: '+e.message));"
+        "})();"
+    )
+    return {"bookmarklet": js}
+
+
+@router.get("/nudges")
+async def get_nudges() -> dict:
+    return {"config": proactive_nudge_service.get()}
+
+
+@router.put("/nudges")
+async def update_nudges(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Nudges payload must be an object.")
+    return {"config": proactive_nudge_service.save(payload)}
+
+
+@router.post("/retro/append")
+async def append_retro(payload: dict) -> dict:
+    """Append an ad-hoc line to today's retrospective log."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' is required.")
+    path = proactive_nudge_service.append_retro(text)
+    return {"ok": True, "path": path}
+
+
+@router.get("/retro")
+async def recent_retros(days: int = Query(7, ge=1, le=60)) -> dict:
+    return {"entries": proactive_nudge_service.recent_retros(days=days)}
+
+
+@router.get("/watchers")
+async def get_watchers() -> dict:
+    return {"config": event_watcher_service.get()}
+
+
+@router.put("/watchers")
+async def update_watchers(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Watchers payload must be an object.")
+    return {"config": event_watcher_service.save(payload)}
+
+
+@router.get("/training/export")
+async def training_export(
+    min_tokens: int = Query(40, ge=0, le=10000, description="Skip runs whose final output is shorter than this (chars/4)."),
+    status: str = Query("completed", description="Comma-separated status filter."),
+) -> StreamingResponse:
+    """Export the operator's conversations as JSONL in OpenAI chat format.
+
+    Each line is a JSON object of shape:
+
+        {"messages": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+
+    Feed this directly into `trl.SFTTrainer`, OpenAI's fine-tune API, or any
+    other instruction-tuning pipeline. The operator profile is included as the
+    system message so the model learns your preferences alongside the content.
+    """
+    allowed_statuses = {s.strip() for s in status.split(",") if s.strip()}
+
+    def _iter() -> "Generator[str, None, None]":
+        operator_context = ""
+        try:
+            operator_context = user_profile_service.render_context()
+        except Exception:
+            operator_context = ""
+        system_prompt = (
+            "You are a personal AI assistant. Respond in the operator's preferred style."
+            + (f"\n\n{operator_context}" if operator_context else "")
+        ).strip()
+        for rec in run_store.list(limit=10_000):
+            if allowed_statuses and str(rec.get("status") or "") not in allowed_statuses:
+                continue
+            task = str(rec.get("task") or "")
+            if task.startswith("[Operator profile"):
+                end = task.find("[/Operator profile]")
+                if end != -1:
+                    task = task[end + len("[/Operator profile]"):].strip()
+            output = str(
+                rec.get("output")
+                or (rec.get("state") or {}).get("final_report")
+                or (rec.get("state") or {}).get("final_answer")
+                or ""
+            ).strip()
+            if not task.strip() or not output:
+                continue
+            if len(output) < min_tokens * 4:  # chars-per-token ≈ 4
+                continue
+            row = {
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task},
+                    {"role": "assistant", "content": output},
+                ]
+            }
+            yield json.dumps(row, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        _iter(),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=brain-training.jsonl"},
+    )
+
+
+@router.get("/analytics/usage")
+async def analytics_usage(days: int = Query(30, ge=1, le=365)) -> dict:
+    """Aggregate run metrics per day for the last N days.
+
+    Backs the UsageDashboard in Studio. Counts are derived from the durable
+    run store (no Neo4j / Zep dependency). Tokens use the ``estimated_total_tokens``
+    from ``run_metrics`` when present (real LangChain numbers on v4.7+, chars/4
+    heuristic otherwise — see the ``token_accuracy`` field on each run for
+    provenance).
+    """
+    from app.core.pricing import estimate_cost_usd, price_for
+
+    rows = run_store.list(limit=10_000)
+    by_day: dict[str, dict[str, float]] = {}
+    by_status: dict[str, int] = {"completed": 0, "failed": 0, "degraded": 0, "running": 0, "queued": 0}
+    by_specialist: dict[str, int] = {}
+    by_model: dict[str, dict[str, float]] = {}
+    cutoff = datetime.now(tz=timezone.utc).timestamp() - days * 86400
+
+    total_runs = 0
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    total_elapsed_ms = 0
+    total_sessions: set[str] = set()
+    actual_token_runs = 0
+    estimated_token_runs = 0
+
+    for rec in rows:
+        created_at = rec.get("created_at") or rec.get("updated_at")
+        if not created_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            continue
+        if ts < cutoff:
+            continue
+        day = str(created_at)[:10]
+        state = rec.get("state") or {}
+        metrics = state.get("run_metrics") or {}
+        prompt_tokens = int(metrics.get("estimated_prompt_tokens") or 0)
+        completion_tokens = int(metrics.get("estimated_completion_tokens") or 0)
+        tokens = int(metrics.get("estimated_total_tokens") or (prompt_tokens + completion_tokens))
+        elapsed = int(metrics.get("elapsed_ms") or 0)
+        status = str(rec.get("status") or "").lower()
+        task_type = str(state.get("task_type") or "conversation")
+        session_id = str(state.get("session_id") or "")
+        accuracy = str(metrics.get("token_accuracy") or "estimated")
+        route = state.get("route_decision") or {}
+        model = ""
+        if isinstance(route, dict):
+            model = str(route.get("model") or route.get("model_id") or "")
+        if not model:
+            model = str(metrics.get("model") or "")
+
+        cost_usd = estimate_cost_usd(model or None, prompt_tokens, completion_tokens)
+
+        total_runs += 1
+        total_prompt_tokens += prompt_tokens
+        total_completion_tokens += completion_tokens
+        total_tokens += tokens
+        total_cost += cost_usd
+        total_elapsed_ms += elapsed
+        if session_id:
+            total_sessions.add(session_id)
+        by_status[status] = by_status.get(status, 0) + 1
+        by_specialist[task_type] = by_specialist.get(task_type, 0) + 1
+        if accuracy == "actual":
+            actual_token_runs += 1
+        else:
+            estimated_token_runs += 1
+
+        key = model or "(unknown)"
+        m = by_model.setdefault(key, {"runs": 0.0, "tokens": 0.0, "cost_usd": 0.0})
+        m["runs"] += 1
+        m["tokens"] += tokens
+        m["cost_usd"] += cost_usd
+
+        bucket = by_day.setdefault(
+            day,
+            {"runs": 0.0, "tokens": 0.0, "elapsed_ms_total": 0.0, "failures": 0.0, "cost_usd": 0.0},
+        )
+        bucket["runs"] += 1
+        bucket["tokens"] += tokens
+        bucket["elapsed_ms_total"] += elapsed
+        bucket["cost_usd"] += cost_usd
+        if status in ("failed", "degraded"):
+            bucket["failures"] += 1
+
+    # Fill the day series with zeros for days with no activity.
+    series: list[dict[str, Any]] = []
+    today = datetime.now(tz=timezone.utc).date()
+    for offset in range(days - 1, -1, -1):
+        day = (today - timedelta(days=offset)).isoformat()
+        bucket = by_day.get(
+            day,
+            {"runs": 0.0, "tokens": 0.0, "elapsed_ms_total": 0.0, "failures": 0.0, "cost_usd": 0.0},
+        )
+        series.append({
+            "date": day,
+            "runs": int(bucket["runs"]),
+            "tokens": int(bucket["tokens"]),
+            "avg_latency_ms": int(bucket["elapsed_ms_total"] / bucket["runs"]) if bucket["runs"] else 0,
+            "failures": int(bucket["failures"]),
+            "cost_usd": round(float(bucket["cost_usd"]), 4),
+        })
+
+    model_prices: dict[str, dict[str, float]] = {}
+    for model_name in by_model.keys():
+        if model_name == "(unknown)":
+            continue
+        prompt_p, completion_p = price_for(model_name)
+        model_prices[model_name] = {"prompt_per_1k": prompt_p, "completion_per_1k": completion_p}
+
+    return {
+        "totals": {
+            "runs": total_runs,
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "tokens": total_tokens,
+            "cost_usd": round(total_cost, 4),
+            "elapsed_ms_total": total_elapsed_ms,
+            "avg_latency_ms": int(total_elapsed_ms / total_runs) if total_runs else 0,
+            "sessions": len(total_sessions),
+            "token_accuracy": {
+                "actual": actual_token_runs,
+                "estimated": estimated_token_runs,
+            },
+        },
+        "by_status": by_status,
+        "by_specialist": by_specialist,
+        "by_model": {
+            k: {"runs": int(v["runs"]), "tokens": int(v["tokens"]), "cost_usd": round(v["cost_usd"], 4)}
+            for k, v in by_model.items()
+        },
+        "model_prices": model_prices,
+        "series": series,
+    }
+
+
+@router.get("/memory/timeline")
+async def memory_timeline(
+    limit: int = Query(80, ge=1, le=500),
+    q: str | None = Query(None, description="Case-insensitive filter over episode content, task, and output."),
+) -> dict:
+    """Aggregate the operator's episodes, claims, and entities across all runs.
+
+    The graph database keeps authoritative lineage, but we also derive a
+    timeline from the durable run store so this surface works even without
+    a connected Neo4j. Newest first.
+    """
+    query = (q or "").strip().lower()
+    rows = run_store.list(limit=400)
+    episodes: list[dict] = []
+    claims: list[dict] = []
+    entities: dict[str, dict] = {}
+    threads: dict[str, dict] = {}
+
+    for rec in rows:
+        state = rec.get("state") or {}
+        run_id = rec.get("run_id")
+        thread_id = state.get("thread_id") or rec.get("session_id") or ""
+        updated = rec.get("updated_at")
+        task_text = str(rec.get("task") or "").strip()
+        if task_text.startswith("[Operator profile"):
+            end = task_text.find("[/Operator profile]")
+            if end != -1:
+                task_text = task_text[end + len("[/Operator profile]"):].strip()
+
+        if thread_id:
+            t = threads.setdefault(thread_id, {
+                "thread_id": thread_id,
+                "last_task": task_text,
+                "last_updated": updated,
+                "run_count": 0,
+            })
+            t["run_count"] += 1
+            if updated and (not t["last_updated"] or updated > t["last_updated"]):
+                t["last_updated"] = updated
+                t["last_task"] = task_text
+
+        for ep in (state.get("episodes") or []):
+            if not isinstance(ep, dict):
+                continue
+            content = str(ep.get("content") or "")
+            if query and query not in content.lower() and query not in task_text.lower():
+                continue
+            episodes.append({
+                "episode_id": ep.get("episode_id"),
+                "agent_id": ep.get("agent_id"),
+                "episode_type": ep.get("episode_type"),
+                "content": content,
+                "created_at": ep.get("created_at") or updated,
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "task_preview": task_text[:80],
+            })
+        for cl in (state.get("claims") or []):
+            if not isinstance(cl, dict):
+                continue
+            text = str(cl.get("text") or "")
+            if query and query not in text.lower():
+                continue
+            claims.append({
+                "claim_id": cl.get("claim_id"),
+                "text": text,
+                "status": cl.get("status"),
+                "run_id": run_id,
+                "thread_id": thread_id,
+                "created_at": updated,
+            })
+        for en in (state.get("entity_mentions") or []):
+            if not isinstance(en, dict):
+                continue
+            key = f"{en.get('entity_id') or en.get('name')}"
+            if not key:
+                continue
+            if query and query not in str(en.get("name") or "").lower():
+                continue
+            current = entities.get(key)
+            if not current:
+                entities[key] = {
+                    "entity_id": en.get("entity_id"),
+                    "name": en.get("name"),
+                    "entity_type": en.get("entity_type"),
+                    "mentions": 1,
+                    "last_run_id": run_id,
+                    "last_seen": updated,
+                }
+            else:
+                current["mentions"] += 1
+                if updated and (not current["last_seen"] or updated > current["last_seen"]):
+                    current["last_seen"] = updated
+                    current["last_run_id"] = run_id
+
+    episodes.sort(key=lambda e: e.get("created_at") or "", reverse=True)
+    claims.sort(key=lambda c: c.get("created_at") or "", reverse=True)
+    threads_list = sorted(threads.values(), key=lambda t: t.get("last_updated") or "", reverse=True)
+
+    return {
+        "episodes": episodes[:limit],
+        "claims": claims[: min(limit, 60)],
+        "entities": sorted(entities.values(), key=lambda e: e["mentions"], reverse=True)[:40],
+        "threads": threads_list[:40],
+    }
+
+
+@router.post("/watchers/dismiss")
+async def dismiss_watcher_items(payload: dict) -> dict:
+    """Add one or more event/message IDs to the watcher's permanent ignore list."""
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    incoming = payload.get("ids")
+    if isinstance(incoming, str):
+        incoming = [incoming]
+    if not isinstance(incoming, list) or not incoming:
+        single = payload.get("id")
+        if not single:
+            raise HTTPException(status_code=400, detail="Provide 'id' or 'ids'.")
+        incoming = [single]
+    existing = set(str(x) for x in (event_watcher_service.get().get("dismiss_ids") or []))
+    for i in incoming:
+        if str(i).strip():
+            existing.add(str(i).strip())
+    return {"config": event_watcher_service.save({"dismiss_ids": list(existing)})}
+
+
+@router.get("/workflows/templates")
+async def list_workflow_templates() -> dict:
+    return {"templates": workflow_template_service.list_templates()}
+
+
+@router.post("/workflows/templates")
+async def create_workflow_template(payload: dict) -> dict:
+    try:
+        tpl = workflow_template_service.create(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"template": tpl}
+
+
+@router.put("/workflows/templates/{template_id}")
+async def update_workflow_template(template_id: str, payload: dict) -> dict:
+    try:
+        tpl = workflow_template_service.update(template_id, payload)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found.") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"template": tpl}
+
+
+@router.delete("/workflows/templates/{template_id}")
+async def delete_workflow_template(template_id: str) -> dict:
+    workflow_template_service.delete(template_id)
+    return {"ok": True}
+
+
+@router.post("/workflows/templates/{template_id}/run")
+async def run_workflow_template(template_id: str, payload: dict) -> dict:
+    """Render the template with ``params`` and fire a live run.
+
+    Body:
+        {"params": {"foo": "..."}, "session_id": "...", "conservative": false}
+    """
+    params = (payload or {}).get("params") or {}
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="'params' must be an object.")
+    try:
+        tpl, rendered, missing = workflow_template_service.render(template_id, params)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Template not found.") from None
+    required_missing: list[str] = []
+    if missing:
+        required_missing = [
+            p["name"]
+            for p in (tpl.get("parameters") or [])
+            if p.get("required") and p.get("name") in missing
+        ]
+        if required_missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required parameters: {', '.join(required_missing)}",
+            )
+    session_id = str((payload or {}).get("session_id") or f"workflow-{template_id[:8]}")
+    conservative = bool((payload or {}).get("conservative", tpl.get("conservative", False)))
+    task_type = tpl.get("task_type") or None
+    run_id = create_run(
+        task=rendered,
+        mode="live",
+        user_id="local",
+        session_id=session_id,
+        conservative_specialist_routing=conservative,
+        forced_task_type=task_type,
+    )
+    workflow_template_service.mark_run(template_id, run_id)
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "rendered_prompt": rendered,
+        "unresolved_params": [m for m in missing if m not in required_missing],
+        "template": workflow_template_service.get(template_id),
+    }
+
+
+@router.get("/chat-watchers")
+async def get_chat_watchers() -> dict:
+    return {"config": chat_watchers_service.get()}
+
+
+@router.put("/chat-watchers")
+async def update_chat_watchers(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    return {"config": chat_watchers_service.save(payload)}
+
+
+@router.post("/watchers/undismiss")
+async def undismiss_watcher_items(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    incoming = payload.get("ids") or ([payload["id"]] if payload.get("id") else [])
+    if not incoming:
+        raise HTTPException(status_code=400, detail="Provide 'id' or 'ids'.")
+    remove = {str(i).strip() for i in incoming if str(i).strip()}
+    existing = [x for x in (event_watcher_service.get().get("dismiss_ids") or []) if str(x) not in remove]
+    return {"config": event_watcher_service.save({"dismiss_ids": existing})}
+
+
+_QUICK_ACTIONS_DIR = "data/exports/notes"
+
+
+@router.post("/quick-action")
+async def dispatch_quick_action(payload: dict) -> dict:
+    """Lightweight follow-on actions from an assistant response.
+
+    action = "note"      -> write markdown into data/exports/notes/
+    action = "email"     -> dispatch via secretary_service (live if creds set)
+    action = "followup"  -> start a new run whose task builds on the provided content
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be an object.")
+    action = str(payload.get("action") or "").strip().lower()
+    content = str(payload.get("content") or "").strip()
+    title = str(payload.get("title") or "").strip() or "Untitled"
+    if not action:
+        raise HTTPException(status_code=400, detail="'action' is required.")
+    if action != "followup" and not content:
+        raise HTTPException(status_code=400, detail="'content' is required for this action.")
+
+    if action == "note":
+        import os
+        import re
+        from pathlib import Path
+        from urllib.parse import quote
+
+        target = str(payload.get("target") or "desktop").lower().strip()
+        body = f"# {title}\n\n_Saved {datetime.now(tz=timezone.utc).isoformat()}_\n\n{content}\n"
+
+        if target == "clipboard":
+            # Nothing to do server-side — tell the frontend to copy.
+            return {"ok": True, "kind": "note", "target": "clipboard", "body": body, "title": title}
+
+        if target == "obsidian":
+            vault = str(payload.get("vault") or "").strip()
+            uri_params = {"name": title, "content": body}
+            if vault:
+                uri_params["vault"] = vault
+            query = "&".join(f"{k}={quote(v)}" for k, v in uri_params.items())
+            return {"ok": True, "kind": "note", "target": "obsidian", "uri": f"obsidian://new?{query}", "title": title}
+
+        # Default: write a markdown file into the exports directory.
+        os.makedirs(_QUICK_ACTIONS_DIR, exist_ok=True)
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "note"
+        stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filename = f"{stamp}-{slug}.md"
+        path = Path(_QUICK_ACTIONS_DIR) / filename
+        path.write_text(body, encoding="utf-8")
+        return {"ok": True, "kind": "note", "target": "desktop", "path": str(path), "title": title}
+
+    if action == "email":
+        to = str(payload.get("to") or "").strip()
+        if not to:
+            raise HTTPException(status_code=400, detail="'to' is required for email.")
+        try:
+            result = secretary_service.dispatch(
+                {
+                    "kind": "email",
+                    "channel": "email",
+                    "to": to,
+                    "subject": title,
+                    "body": content,
+                    "mode": "live",
+                },
+            )
+            return {"ok": True, "kind": "email", "result": result}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if action == "followup":
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            raise HTTPException(status_code=400, detail="'prompt' is required for follow-up.")
+        task = f"{prompt}\n\nContext from the previous turn:\n{content}" if content else prompt
+        new_run_id = create_run(
+            task=task,
+            mode=str(payload.get("mode") or "live"),
+            user_id=str(payload.get("user_id") or "local"),
+            session_id=str(payload.get("session_id") or "followup"),
+            conservative_specialist_routing=False,
+        )
+        return {"ok": True, "kind": "followup", "run_id": new_run_id}
+
+    raise HTTPException(status_code=400, detail=f"Unsupported action '{action}'.")
 
 
 @router.post("/tts/test")

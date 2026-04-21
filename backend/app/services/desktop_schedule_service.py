@@ -113,7 +113,7 @@ class DesktopScheduleService:
             "workflow_kind": str(payload.get("workflow_kind") or "morning_brief"),
             "agent_id": str(payload.get("agent_id") or "coordinator"),
             "enabled": bool(payload.get("enabled", True)),
-            "mode": str(payload.get("mode") or "simulation"),
+            "mode": str(payload.get("mode") or "live"),
             "approval_required": bool(payload.get("approval_required", False)),
             "output_preset": output_preset,
             "output_subdir": output_subdir,

@@ -5,16 +5,31 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-RunMode = Literal["simulation", "live"]
+RunMode = Literal["live"]
 RunStatus = Literal["queued", "running", "completed", "failed", "degraded"]
+
+
+TaskTypeOverride = Literal[
+    "market_research",
+    "capabilities",
+    "conversation",
+    "shopping",
+    "social_media",
+    "secretary",
+    "news_brief",
+    "wellness_coaching",
+]
 
 
 class RunRequest(BaseModel):
     user_id: str = Field(default="demo-user")
     session_id: str = Field(default="demo-session")
     task: str
-    mode: RunMode = "simulation"
+    mode: RunMode = "live"
     conservative_specialist_routing: bool = False
+    # When set, the coordinator will skip task-type detection and use this
+    # directly. Used by the frontend's specialist channel chips.
+    task_type: TaskTypeOverride | None = None
 
 
 class ToolAttempt(BaseModel):

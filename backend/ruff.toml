@@ -1,0 +1,48 @@
+# Ruff config for the KG Multi-Agent backend.
+# Run from backend/ with `ruff check .` and `ruff format .`.
+
+line-length = 110
+target-version = "py311"
+src = ["app", "tests"]
+exclude = [
+  ".venv",
+  ".venv311",
+  "build",
+  "dist",
+  "data",
+  "kg_multi_agent_backend.egg-info",
+]
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # import sorting
+  "B",   # bugbear
+  "UP",  # pyupgrade
+  "SIM", # simplifications
+  "RUF", # ruff-specific
+  "N",   # naming
+  "S",   # security (bandit subset)
+]
+ignore = [
+  "E501",    # line-length handled by formatter
+  "S101",    # asserts are fine in tests
+  "B008",    # FastAPI depends on function-call defaults
+  "N803",    # pydantic often uses snake_case aliases
+  "S104",    # binding to 0.0.0.0 in docker is intentional for the API container
+  "SIM108",  # ternary-vs-if readability is case-by-case
+]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["S", "B", "SIM"]
+"app/workers/**" = ["S603", "S607"]  # workers legitimately spawn subprocesses
+
+[lint.isort]
+known-first-party = ["app"]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

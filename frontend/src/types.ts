@@ -1,4 +1,4 @@
-export type RunMode = 'simulation' | 'live';
+export type RunMode = 'live';
 
 export interface RunResponse {
   run_id: string;
@@ -359,7 +359,7 @@ export interface DesktopSchedule {
   workflow_kind: string;
   agent_id: string;
   enabled: boolean;
-  mode: 'simulation' | 'live';
+  mode: 'live';
   approval_required: boolean;
   output_preset?: string;
   output_subdir?: string;

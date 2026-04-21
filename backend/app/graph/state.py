@@ -8,7 +8,7 @@ class AgentState(TypedDict, total=False):
     user_id: str
     session_id: str
     thread_id: str
-    mode: Literal["simulation", "live"]
+    mode: Literal["live"]
     task: str
     task_type: Literal["market_research", "capabilities", "conversation", "shopping", "social_media", "secretary", "news_brief", "wellness_coaching"]
     agent_profiles: dict[str, dict[str, str]]
@@ -48,3 +48,4 @@ class AgentState(TypedDict, total=False):
     force_degraded: bool
     fast_path: str
     conservative_specialist_routing: bool
+    forced_task_type: str

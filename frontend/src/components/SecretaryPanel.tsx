@@ -11,7 +11,7 @@ export function SecretaryPanel() {
   const [to, setTo] = useState('');
   const [subject, setSubject] = useState('Appointment follow-up from Nora');
   const [message, setMessage] = useState('Hello, this is Nora calling on behalf of Matt to coordinate a time for a short appointment. Please let us know what works best.');
-  const [mode, setMode] = useState<RunMode>('simulation');
+  const [mode] = useState<RunMode>('live');
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [contactDraft, setContactDraft] = useState<SecretaryContactPreference>({
@@ -278,13 +278,6 @@ export function SecretaryPanel() {
       <label>
         Message
         <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={5} />
-      </label>
-      <label>
-        Mode
-        <select value={mode} onChange={(e) => setMode(e.target.value as RunMode)}>
-          <option value="simulation">simulation</option>
-          <option value="live">live</option>
-        </select>
       </label>
       <div className="action-row">
         <button type="button" onClick={() => void submit()} disabled={busy || (!selectedContactId && !to.trim()) || !message.trim()}>

@@ -27,7 +27,7 @@ PLAYWRIGHT_SCRIPT_PRESETS: list[dict[str, Any]] = [
         "agent_id": "researcher",
         "description": "Open a page, let it settle, then extract the main headline and first paragraph.",
         "start_url": "https://example.com",
-        "mode": "simulation",
+        "mode": "live",
         "approval_required": False,
         "steps": [
             {"action": "wait", "timeout_ms": 1200, "label": "settle"},
@@ -41,7 +41,7 @@ PLAYWRIGHT_SCRIPT_PRESETS: list[dict[str, Any]] = [
         "agent_id": "shopper",
         "description": "Open a product listing page and extract title plus price-like text from the first result block.",
         "start_url": "https://example.com",
-        "mode": "simulation",
+        "mode": "live",
         "approval_required": False,
         "steps": [
             {"action": "wait", "timeout_ms": 1600, "label": "wait_for_cards"},
@@ -55,7 +55,7 @@ PLAYWRIGHT_SCRIPT_PRESETS: list[dict[str, Any]] = [
         "agent_id": "social",
         "description": "Open an admin or analytics page and extract the visible title and key KPI card text.",
         "start_url": "https://example.com",
-        "mode": "simulation",
+        "mode": "live",
         "approval_required": False,
         "steps": [
             {"action": "wait", "timeout_ms": 1500, "label": "wait_for_dashboard"},
@@ -165,7 +165,7 @@ class PlaywrightService:
             "agent_id": str(payload.get("agent_id") or "researcher"),
             "start_url": str(payload.get("start_url") or ""),
             "steps": list(payload.get("steps") or []),
-            "mode": str(payload.get("mode") or "simulation"),
+            "mode": str(payload.get("mode") or "live"),
             "approval_required": bool(payload.get("approval_required", False)),
             "notes": [str(item) for item in list(payload.get("notes") or [])],
             "last_run_at": str(payload.get("last_run_at") or ""),

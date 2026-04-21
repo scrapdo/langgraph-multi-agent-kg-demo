@@ -1,22 +1,98 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
-from neo4j import GraphDatabase
-
 from app.core.config import settings
+
+logger = logging.getLogger("app.neo4j")
+
+# Neo4j is optional. The native-app bundle ships without the driver to keep
+# binary size down; the Docker stack keeps it installed. If the package is
+# missing, we skip graph storage entirely (no-op driver below).
+try:
+    from neo4j import GraphDatabase  # type: ignore[import-not-found]
+    _NEO4J_AVAILABLE = True
+except Exception:
+    GraphDatabase = None  # type: ignore[assignment]
+    _NEO4J_AVAILABLE = False
+
+
+class _NoOpResult:
+    """Sink that mimics the shape of a neo4j Result but holds no data. Used
+    when Neo4j is unconfigured or unreachable in native-app builds."""
+
+    def single(self) -> None:
+        return None
+
+    def data(self) -> list:
+        return []
+
+    def values(self, *_: Any) -> list:
+        return []
+
+    def __iter__(self):
+        return iter([])
+
+
+class _NoOpSession:
+    def __enter__(self) -> "_NoOpSession":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def run(self, *_: Any, **__: Any) -> _NoOpResult:
+        return _NoOpResult()
+
+
+class _NoOpDriver:
+    """Drop-in replacement for a neo4j Driver when Neo4j is disabled.
+
+    Every .session() produces a no-op context manager; every .run() returns
+    an empty result. That lets the rest of the codebase stay identical while
+    graph storage silently becomes a no-op.
+    """
+
+    def session(self, *_: Any, **__: Any) -> _NoOpSession:
+        return _NoOpSession()
+
+    def close(self) -> None:
+        return None
+
+
+def _build_driver() -> Any:
+    """Return a real neo4j Driver when configured and reachable, otherwise a
+    no-op driver. Native-app builds leave ``neo4j_uri`` blank so graph storage
+    is skipped entirely without crashing anything upstream."""
+    if not _NEO4J_AVAILABLE:
+        logger.info("neo4j package not installed — graph storage is a no-op")
+        return _NoOpDriver()
+    uri = (settings.neo4j_uri or "").strip()
+    if not uri:
+        logger.info("Neo4j disabled (no URI configured) — graph storage is a no-op")
+        return _NoOpDriver()
+    try:
+        driver = GraphDatabase.driver(uri, auth=(settings.neo4j_user, settings.neo4j_password))
+        # Probe the connection so we fail fast if the server isn't there.
+        driver.verify_connectivity()
+        return driver
+    except Exception as exc:
+        logger.warning("Neo4j connection failed (%s) — falling back to no-op driver", exc)
+        return _NoOpDriver()
 
 
 class Neo4jService:
     def __init__(self) -> None:
-        self._driver = GraphDatabase.driver(
-            settings.neo4j_uri,
-            auth=(settings.neo4j_user, settings.neo4j_password),
-        )
-        self._constraints_ready = False
+        self._driver = _build_driver()
+        self._constraints_ready = isinstance(self._driver, _NoOpDriver)
+
+    @property
+    def enabled(self) -> bool:
+        return not isinstance(self._driver, _NoOpDriver)
 
     def close(self) -> None:
         self._driver.close()
