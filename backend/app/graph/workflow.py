@@ -70,14 +70,28 @@ def build_checkpointer():
     """
     if settings.postgres_dsn:
         try:
-            from langgraph.checkpoint.postgres import PostgresSaver
+            # Must be the ASYNC variant — the workflow is invoked via ainvoke(),
+            # and langgraph's base class no longer has a default sync→async
+            # fallback for aget_tuple. The sync PostgresSaver silently raises
+            # NotImplementedError on the first async read, which the run_service
+            # used to swallow as {'error': ''}. Observed: every research run
+            # failed in ~0.3s with zero diagnostic.
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-            cm = PostgresSaver.from_conn_string(_postgres_dsn_for_langgraph())
-            # Newer langgraph versions return a context manager from from_conn_string.
-            # Support both shapes without branching on the library version.
-            saver = cm.__enter__() if hasattr(cm, "__enter__") else cm
-            saver.setup()
-            logger.info("langgraph postgres checkpointer ready")
+            import asyncio as _asyncio
+
+            cm = AsyncPostgresSaver.from_conn_string(_postgres_dsn_for_langgraph())
+            loop = _asyncio.new_event_loop()
+            try:
+                saver = loop.run_until_complete(cm.__aenter__())
+            finally:
+                loop.close()
+            loop2 = _asyncio.new_event_loop()
+            try:
+                loop2.run_until_complete(saver.setup())
+            finally:
+                loop2.close()
+            logger.info("langgraph async-postgres checkpointer ready")
             return saver
         except Exception as exc:
             logger.warning("postgres checkpointer failed (%s); falling back to sqlite", exc)

@@ -211,7 +211,26 @@ async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, A
         _spawn_deferred_persistence(result)
         return result
     except Exception as exc:
-        run_store.update(run_id, status="failed", state={"error": str(exc)}, output=None)
+        # Never let an exception vanish. str(exc) is empty for things like
+        # NotImplementedError() — which is exactly what a mis-wired checkpointer
+        # raises — so we fall back to the type name, and ALWAYS log the full
+        # traceback server-side so the next bug is diagnosable without hacks.
+        import logging
+        import traceback as _tb
+
+        tb_str = _tb.format_exc()
+        error_text = str(exc) or type(exc).__name__ or "Unknown error"
+        logging.getLogger("app.run_service").error(
+            "run_failed",
+            extra={"run_id": run_id, "error_type": type(exc).__name__, "error": error_text},
+        )
+        logging.getLogger("app.run_service").error(tb_str)
+        run_store.update(
+            run_id,
+            status="failed",
+            state={"error": error_text, "error_type": type(exc).__name__, "traceback": tb_str[-4000:]},
+            output=None,
+        )
         await _safe_upsert_run(
             run_id,
             task=initial_state["task"],
@@ -221,8 +240,8 @@ async def execute_run(run_id: str, initial_state: dict[str, Any]) -> dict[str, A
             mode=initial_state.get("mode"),
             task_type=initial_state.get("task_type"),
         )
-        await event_bus.publish(run_id, {"node": "system", "status": "failed", "detail": str(exc)})
-        return {"error": str(exc)}
+        await event_bus.publish(run_id, {"node": "system", "status": "failed", "detail": error_text})
+        return {"error": error_text}
 
 
 def create_run(
