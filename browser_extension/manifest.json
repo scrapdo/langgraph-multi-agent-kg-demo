@@ -3,7 +3,7 @@
   "name": "Ask My Brain",
   "short_name": "Brain",
   "version": "0.1.0",
-  "description": "Send the current page (or selection) to your local LangGraph Brain and get a notification when the run completes.",
+  "description": "Send the current page (or selection) to your local Brain and get a notification when the run completes.",
   "permissions": ["activeTab", "scripting", "storage", "notifications"],
   "host_permissions": [
     "http://127.0.0.1/*",

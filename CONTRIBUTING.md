@@ -82,7 +82,7 @@ npx prettier --check "src/**/*.{ts,tsx,css}"
 cd desktop
 npm install
 npm start           # splash -> docker compose up -> main window
-npm run dist        # produce release/mac-arm64/LangGraph Brain.app
+npm run dist        # produce release/mac-arm64/The Brain.app
 ```
 
 ## Branching & commit style

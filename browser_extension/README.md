@@ -2,7 +2,7 @@
 
 A minimal Chrome / Chromium / Brave / Edge extension that sends the current page
 (URL, title, highlighted selection, and an optional question) to your locally-running
-LangGraph Brain and notifies you when the run finishes.
+Brain and notifies you when the run finishes.
 
 Does the same thing as the bookmarklet, with the benefits of:
 

@@ -1,6 +1,6 @@
-# KG Multi-Agent System
+# The Brain
 
-A Dockerized multi-agent AI operations system built around LangGraph orchestration, Neo4j lineage, Zep memory, provider-aware model routing, voice interaction, and a React operations dashboard.
+A voice-first multi-agent AI operations system built around LangGraph orchestration, Neo4j lineage, Zep memory, provider-aware model routing, voice interaction, and a React operations dashboard. Runs natively on macOS as a standalone app, or as a Dockerized stack for development.
 
 This repository is not a thin mockup. It contains a working end-to-end system with:
 - a coordinator/researcher/critic/writer workflow

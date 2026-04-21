@@ -1,7 +1,7 @@
 [project]
 name = "kg-multi-agent-backend"
 version = "0.1.0"
-description = "LangGraph multi-agent KG demo backend"
+description = "The Brain — backend for a voice-first multi-agent operations system built on LangGraph"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",

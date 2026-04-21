@@ -1,4 +1,4 @@
-# Ruff config for the KG Multi-Agent backend.
+# Ruff config for The Brain backend.
 # Run from backend/ with `ruff check .` and `ruff format .`.
 
 line-length = 110

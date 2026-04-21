@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how the KG Multi-Agent system is wired together —
+This document describes how The Brain is wired together —
 processes, data flow, and the non-obvious design choices that drove the
 current shape.
 

@@ -1,6 +1,6 @@
 # Security
 
-The KG Multi-Agent system is designed for **local, single-operator** use on a
+The Brain is designed for **local, single-operator** use on a
 trusted workstation. It is not hardened for public deployment. This document
 lists the threat model assumptions, the controls that are in place, and how to
 report issues.

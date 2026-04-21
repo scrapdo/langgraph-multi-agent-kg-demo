@@ -1,4 +1,4 @@
-# LangGraph Brain — Desktop (Electron)
+# The Brain — Desktop (Electron)
 
 One-click desktop launcher for the whole multi-agent stack. When you open the
 app, it:
@@ -40,7 +40,7 @@ npm install
 npm run dist
 ```
 
-The produced `release/mac-arm64/LangGraph Brain.app` contains:
+The produced `release/mac-arm64/The Brain.app` contains:
 
 - the Electron runtime,
 - the launcher (`main.js`, `launcher.js`, `preload.js`, `splash.html`),
