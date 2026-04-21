@@ -117,7 +117,24 @@ After the operator confirms, call the tool with ALL required fields in a single 
 
 If the operator hesitates, says "wait", "no", or gives a partial/unclear answer, DO NOT call the tool. Ask a clarifying question.
 
-SCHEDULE PROACTIVE TASKS when the operator asks for something recurring — "every morning at 8am give me X", "daily at 6 tell me Y", "every Monday summarize Z". Call `schedule_proactive` with a clear name, a standalone prompt, local time (hour/minute), and the weekdays. For "daily" use all seven. If the operator asks "what am I running?", call `list_proactive` and read back the list in one short sentence. To cancel, use `cancel_proactive` — but confirm the specific task name before calling.
+SCHEDULE PROACTIVE TASKS when the operator asks for something recurring — "every morning at 8am give me X", "daily at 6 tell me Y", "every Monday summarize Z". Call `schedule_proactive` with a clear name, a standalone prompt, local time (hour/minute), and the weekdays. For "daily" use all seven. To cancel, use `cancel_proactive` — but confirm the specific task name before calling.
+
+VERIFYING PROACTIVE RESULTS (your accountability loop):
+When the operator asks about a recurring task — "did my morning brief run?", "what's in my jobs report?", "why didn't I get my news today?" — you MUST call `list_proactive` before answering. Never guess or assume a scheduled task completed.
+
+Each proactive task returned by `list_proactive` includes:
+- `last_run_status`: "completed", "failed", "degraded", "stuck", or null if it never ran.
+- `last_success_at`: ISO timestamp of the most recent successful finish (null if never succeeded).
+- `last_output_summary`: up to 1200 chars of the last successful output. READ THIS to the operator when they ask for the result.
+- `last_error`: short failure explanation when the last run didn't succeed.
+
+Rules:
+- If `last_success_at` is today and the operator asked for today's result, read `last_output_summary` aloud (condense to 3-4 sentences for spoken delivery).
+- If `last_run_status` is "failed", "degraded", or "stuck", tell the operator the task failed, mention `last_error` briefly, and offer to re-run it manually.
+- If the task was scheduled but never ran (no `last_run_status` at all), say so honestly — don't pretend.
+- If the task WOULD have fired but hasn't yet (current time is before the scheduled hour today), say "it's scheduled for <time>, hasn't run yet today".
+
+When the operator just asks "what am I running?", call `list_proactive` and read back names + times + most recent status in one short sentence per task.
 
 HAND OFF via the `route_to_specialist` tool when the request needs real work (research, writing, wellness advice, etc.):
 - secretary — calls, texts, emails, scheduling, follow-ups, inbox triage.
@@ -258,7 +275,15 @@ def build_delegator_tools() -> list[dict[str, Any]]:
         {
             "type": "function",
             "name": "list_proactive",
-            "description": "Return the list of scheduled proactive tasks the operator has configured.",
+            "description": (
+                "Return all scheduled proactive tasks AND their last-run outcome. "
+                "Each task includes: name, schedule (hour/minute/days), last_run_status "
+                "(completed/failed/degraded/stuck/null), last_success_at (ISO timestamp), "
+                "last_output_summary (up to 1200 chars of the most recent successful output), "
+                "and last_error (short failure message if the last run didn't succeed). "
+                "Call this whenever the operator asks about the status or result of a "
+                "recurring task — never guess whether a scheduled task completed."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
         {

@@ -581,6 +581,16 @@ def _proactive_view(template: dict) -> dict:
         },
         "run_count": int(template.get("run_count") or 0),
         "last_run_at": template.get("last_run_at"),
+        # Outcome tracking — scheduler polls each run to a terminal state and
+        # writes these back. "last_fired_on" only says we queued; these say
+        # whether the work actually finished. The delegator reads these so it
+        # can honestly answer "did my morning brief run?" instead of guessing.
+        "last_run_id": template.get("last_outcome_run_id") or template.get("last_run_id"),
+        "last_run_status": template.get("last_run_status"),
+        "last_run_completed_at": template.get("last_run_completed_at"),
+        "last_success_at": template.get("last_success_at"),
+        "last_output_summary": template.get("last_output_summary"),
+        "last_error": template.get("last_error"),
     }
 
 

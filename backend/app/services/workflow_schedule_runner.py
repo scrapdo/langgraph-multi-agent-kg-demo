@@ -14,12 +14,61 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 
+from app.repositories.run_store import run_store
 from app.services.run_service import create_run
 from app.services.workflow_template_service import workflow_template_service
 
 logger = logging.getLogger("app.workflow_schedule")
+
+
+def _watch_run_outcome(template_id: str, run_id: str, timeout_seconds: float = 900.0) -> None:
+    """Poll the run until it reaches a terminal state, then write the outcome
+    back onto the template so the delegator can see success/failure + preview.
+
+    Runs on a daemon thread per fired schedule. Timeout is 15 minutes — runs
+    longer than that are rare; if they happen we bail and mark the template's
+    last_run_status as "stuck" so the delegator surfaces it.
+    """
+    deadline = time.time() + timeout_seconds
+    terminal = {"completed", "failed", "degraded"}
+    last_status = ""
+    while time.time() < deadline:
+        rec = run_store.get(run_id)
+        if rec:
+            status = str(rec.get("status") or "")
+            last_status = status
+            if status in terminal:
+                state = rec.get("state") or {}
+                output = str(state.get("spoken_response") or state.get("final_report") or "").strip()
+                error = str((state.get("errors") or [""])[0] if state.get("errors") else "")
+                workflow_template_service.mark_run_outcome(
+                    template_id,
+                    run_id=run_id,
+                    status=status,
+                    output_summary=output,
+                    error=error,
+                )
+                logger.info(
+                    "workflow_schedule_outcome",
+                    extra={"template_id": template_id, "run_id": run_id, "status": status},
+                )
+                return
+        time.sleep(5)
+
+    # Timed out waiting for terminal state.
+    workflow_template_service.mark_run_outcome(
+        template_id,
+        run_id=run_id,
+        status="stuck",
+        error=f"no terminal state after {int(timeout_seconds)}s (last seen: {last_status or 'unknown'})",
+    )
+    logger.warning(
+        "workflow_schedule_outcome_timeout",
+        extra={"template_id": template_id, "run_id": run_id, "last_status": last_status},
+    )
 
 
 class WorkflowScheduleRunner:
@@ -103,6 +152,15 @@ class WorkflowScheduleRunner:
                 )
                 workflow_template_service.mark_run(template_id, run_id)
                 workflow_template_service.mark_schedule_fired(template_id, today_iso)
+                # Fire-and-follow: spawn a thread that watches the run to its
+                # terminal state and writes the outcome back onto the template.
+                # Without this, "last_fired_on" lies — it only proves we queued.
+                threading.Thread(
+                    target=_watch_run_outcome,
+                    args=(template_id, run_id),
+                    name=f"watch-{template_id[:8]}",
+                    daemon=True,
+                ).start()
                 logger.info(
                     "workflow_schedule_fired",
                     extra={"template_id": template_id, "run_id": run_id, "name": tpl_with_defaults.get("name")},

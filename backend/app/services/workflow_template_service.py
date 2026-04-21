@@ -281,6 +281,41 @@ class WorkflowTemplateService:
                 self._write(items)
                 return
 
+    def mark_run_outcome(
+        self,
+        template_id: str,
+        *,
+        run_id: str,
+        status: str,
+        output_summary: str = "",
+        error: str = "",
+    ) -> None:
+        """Record the OUTCOME of the scheduled run, not just that it was queued.
+
+        ``mark_run`` is the "we fired something" hook; this one closes the loop
+        so the delegator can honestly tell the operator whether their proactive
+        task actually succeeded. Mirrors the fields the delegator reads via
+        list_proactive.
+        """
+        with self._lock:
+            items = self._read()
+            now = datetime.now(tz=timezone.utc).isoformat()
+            for idx, tpl in enumerate(items):
+                if tpl.get("id") != template_id:
+                    continue
+                tpl["last_run_status"] = status
+                tpl["last_run_completed_at"] = now
+                if status == "completed":
+                    tpl["last_success_at"] = now
+                    tpl["last_output_summary"] = (output_summary or "").strip()[:1200]
+                    tpl["last_error"] = ""
+                else:
+                    tpl["last_error"] = (error or "").strip()[:400]
+                tpl["last_outcome_run_id"] = run_id
+                items[idx] = tpl
+                self._write(items)
+                return
+
     # --- rendering ---
     def render(self, template_id: str, params: dict[str, Any]) -> tuple[dict[str, Any], str, list[str]]:
         """Return the template, the substituted prompt, and the list of unresolved params."""
