@@ -6,6 +6,7 @@ import {
   executeAppControl,
   getRunSpeech,
   listProactiveTasks,
+  placeSecretaryCall,
   quickLookup,
   type ProactiveTask,
 } from '../api/client';
@@ -238,6 +239,32 @@ export function VoiceShell() {
             realtime.sendToolResult(
               call.callId,
               JSON.stringify({ status: 'error', error: err instanceof Error ? err.message : String(err) }),
+            );
+          });
+        return;
+      }
+      if (call.name === 'secretary_place_call') {
+        const to = String((call.args as { to?: string }).to ?? '').trim();
+        const context = String((call.args as { context?: string }).context ?? '').trim();
+        if (!to) {
+          realtime.sendToolResult(call.callId, JSON.stringify({ status: 'error', error: 'to required' }));
+          return;
+        }
+        pushTranscript('system', `📞 Placing call to ${to}…`);
+        void placeSecretaryCall(to, context)
+          .then((res) => {
+            pushTranscript('system', `📞 Call placed (sid ${(res.sid || '').slice(0, 8)}). Secretary is on the line.`);
+            realtime.sendToolResult(
+              call.callId,
+              JSON.stringify({ status: 'ok', sid: res.sid, call_status: res.status, to: res.to }),
+            );
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            pushTranscript('system', `Call failed: ${message}`);
+            realtime.sendToolResult(
+              call.callId,
+              JSON.stringify({ status: 'error', error: message }),
             );
           });
         return;

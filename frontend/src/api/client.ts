@@ -716,6 +716,34 @@ export async function listProactiveTasks(): Promise<ProactiveTask[]> {
   return body.tasks;
 }
 
+export interface PlaceCallResult {
+  ok: boolean;
+  sid?: string;
+  status?: string;
+  to?: string;
+  from?: string;
+  placed_at?: string;
+}
+
+export async function placeSecretaryCall(to: string, context: string): Promise<PlaceCallResult> {
+  const res = await fetch(`${API_BASE}/telephony/place-call`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to, context }),
+  });
+  if (!res.ok) {
+    let detail = `place-call ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch {
+      /* keep generic */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as PlaceCallResult;
+}
+
 export async function deleteProactiveTask(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/proactive/${encodeURIComponent(id)}`, {
     method: 'DELETE',

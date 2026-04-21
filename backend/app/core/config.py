@@ -130,6 +130,11 @@ class Settings(BaseSettings):
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""
+    # Public https URL that Twilio can hit for webhooks + media streams.
+    # In dev, point this at your Cloudflare tunnel / ngrok host
+    # (e.g. https://abc.trycloudflare.com). Without it, inbound telephony
+    # routes refuse with a clear setup error.
+    telephony_public_base: str = ""
     telnyx_api_key: str = ""
     telnyx_phone_number: str = ""
     telnyx_connection_id: str = ""

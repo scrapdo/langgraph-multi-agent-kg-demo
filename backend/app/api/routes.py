@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Generator
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.responses import Response, StreamingResponse
 
@@ -652,6 +653,148 @@ async def app_control(payload: dict) -> dict:
             detail=f"{exc} (received arg keys: {sorted(merged_args.keys())})",
         ) from exc
     return {"ok": True, "app": app_name, "action": action, "result": result}
+
+
+# ---------------------------------------------------------------------------
+# Telephony — Twilio Media Streams ↔ OpenAI Realtime bridge
+#
+# Public URL required: Twilio can only hit endpoints reachable from the public
+# internet. In dev, use a Cloudflare tunnel or ngrok pointed at :8000 and set
+# TELEPHONY_PUBLIC_BASE=https://<tunnel>.trycloudflare.com in your env file.
+# ---------------------------------------------------------------------------
+
+
+def _twilio_stream_ws_url() -> str:
+    """Build the wss://... URL Twilio will use for the Media Stream.
+
+    We derive it from TELEPHONY_PUBLIC_BASE so Twilio can reach our FastAPI
+    WebSocket. In dev this points at the Cloudflare tunnel; in prod it's the
+    actual public hostname.
+    """
+    base = (settings.telephony_public_base or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(
+            status_code=503,
+            detail="TELEPHONY_PUBLIC_BASE not configured. Point it at your public tunnel host, "
+            "e.g. https://abc.trycloudflare.com",
+        )
+    # Twilio requires wss://. Swap http→ws, https→wss.
+    if base.startswith("https://"):
+        ws_base = "wss://" + base[len("https://") :]
+    elif base.startswith("http://"):
+        ws_base = "ws://" + base[len("http://") :]
+    else:
+        ws_base = "wss://" + base
+    return ws_base + "/telephony/stream"
+
+
+async def _validate_twilio_request(request: Request, form: dict[str, str]) -> None:
+    """Verify the Twilio signature on an inbound webhook. Raises 403 on mismatch.
+
+    Disabled when no auth token is set so local/dev testing without a real
+    Twilio doesn't bounce off the gate.
+    """
+    from app.services.telephony_service import validate_twilio_signature
+
+    if not settings.twilio_auth_token:
+        return  # Not configured yet — skip validation.
+    signature = request.headers.get("X-Twilio-Signature", "")
+    # Twilio signs the full URL it POSTed to (including query string).
+    full_url = str(request.url)
+    if not validate_twilio_signature(settings.twilio_auth_token, full_url, form, signature):
+        logging.getLogger("app.telephony").warning(
+            "twilio_signature_invalid", extra={"url": full_url}
+        )
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+
+@router.post("/telephony/incoming")
+async def telephony_incoming(request: Request) -> Response:
+    """Twilio POSTs here when an inbound call rings our number. We reply with
+    TwiML that tells Twilio to open a Media Stream back to our WebSocket."""
+    from app.services.telephony_service import telephony_service
+
+    form = dict((await request.form()).items())
+    await _validate_twilio_request(request, form)
+
+    stream_url = _twilio_stream_ws_url() + "?direction=inbound"
+    twiml = telephony_service.twiml_for_incoming(stream_url)
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/telephony/outgoing")
+async def telephony_outgoing(request: Request) -> Response:
+    """Twilio POSTs here when OUR outbound call is answered. Mirror of
+    /telephony/incoming: return TwiML that wires a Media Stream."""
+    from app.services.telephony_service import telephony_service
+
+    form = dict((await request.form()).items())
+    await _validate_twilio_request(request, form)
+
+    context = request.query_params.get("context", "")
+    import urllib.parse as _up
+
+    stream_url = (
+        _twilio_stream_ws_url()
+        + "?direction=outbound&context="
+        + _up.quote(context)
+    )
+    twiml = telephony_service.twiml_for_outgoing(stream_url)
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/telephony/place-call")
+async def telephony_place_call(payload: dict) -> dict:
+    """Initiate an outbound call via Twilio. The delegator's
+    ``secretary_place_call`` tool routes here.
+
+    Body: ``{"to": "+14105551234", "context": "confirm Tuesday vet appointment"}``
+    """
+    from app.services.telephony_service import telephony_service
+
+    to = str((payload or {}).get("to") or "").strip()
+    context = str((payload or {}).get("context") or "").strip()
+    if not to:
+        raise HTTPException(status_code=400, detail="`to` is required (phone number in E.164 format).")
+    if not to.startswith("+"):
+        raise HTTPException(status_code=400, detail="`to` must be E.164 (e.g. +14105551234).")
+
+    base = (settings.telephony_public_base or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(
+            status_code=503,
+            detail="TELEPHONY_PUBLIC_BASE not configured. Set it to your public tunnel URL.",
+        )
+    try:
+        result = await telephony_service.place_call(to, context, webhook_base=base)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.websocket("/telephony/stream")
+async def telephony_stream(websocket: WebSocket) -> None:
+    """Twilio Media Stream endpoint. One WebSocket per active call.
+
+    Query params:
+      - direction: "inbound" or "outbound" (defaults to "inbound")
+      - context:   optional free-text context for outbound calls
+    """
+    from app.services.telephony_service import telephony_service
+
+    direction = websocket.query_params.get("direction", "inbound")
+    context = websocket.query_params.get("context", "")
+    await websocket.accept()
+    bridge = telephony_service.new_bridge(websocket, direction=direction, context=context)
+    try:
+        await bridge.run()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @router.post("/realtime/session")

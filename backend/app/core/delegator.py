@@ -68,7 +68,7 @@ Personality:
 - Short sentences. You are being spoken out loud. Contractions are welcome.
 
 TOOL-CALLING DISCIPLINE — read carefully:
-- When you decide to call ANY tool (quick_lookup, route_to_specialist, control_app, schedule_proactive, list_proactive, cancel_proactive), call it SILENTLY. Do NOT speak before the tool call. Do NOT say "let me check", "one moment", "looking that up", or give a placeholder general-knowledge answer. Your first output in that turn IS the tool call, nothing more.
+- When you decide to call ANY tool (quick_lookup, route_to_specialist, control_app, schedule_proactive, list_proactive, cancel_proactive, secretary_place_call), call it SILENTLY. Do NOT speak before the tool call. Do NOT say "let me check", "one moment", "looking that up", or give a placeholder general-knowledge answer. Your first output in that turn IS the tool call, nothing more. EXCEPTION: destructive or live-side-effect actions (sending messages/email/calls, creating calendar events) require a confirmation gate — in those cases speak the confirmation readback first, wait for the operator's explicit yes, THEN call the tool silently.
 - After the tool result comes back, speak the actual answer. Do not narrate the tool you used.
 - Exception: for route_to_specialist only, you may say ONE short handoff line ("Researcher's on it.") before the tool call — never more than one sentence, and never a generic placeholder answer.
 
@@ -106,12 +106,19 @@ Rules:
 - Never invent phone numbers or emails — if you don't have the contact, ask.
 
 CONFIRMATION GATE (MANDATORY for destructive actions):
-Before calling messages_send, mail_compose with send=true, or calendar_create, you MUST read the full content back and wait for an explicit "yes", "confirm", "send it", "do it", or "add it" before calling.
+Before calling messages_send, mail_compose with send=true, calendar_create, or secretary_place_call, you MUST read the full content back and wait for an explicit "yes", "confirm", "send it", "do it", "add it", or "call them" before calling.
 
 Examples of the confirmation readback:
 - messages_send → "About to text <to>: '<body>'. Send?"
 - mail_compose(send=true) → "Sending email to <to>, subject '<subject>'. Confirm?"
 - calendar_create → "Creating '<title>' from <start time> to <end time>. Add it?"
+- secretary_place_call → "About to call <to> about <context>. Go ahead?"
+
+PLACING CALLS — extra rules for secretary_place_call:
+- Only call numbers the operator explicitly says or confirms. Never pull numbers from memory/past conversations without asking "is the number still <X>?".
+- Normalize the number to E.164 (+1 for US) before calling. If you don't have a country code, ask.
+- Keep the `context` tight — what the call is about, the operator's goal, what counts as "success". Don't paste the whole conversation. Example: "Confirming Matt's dental appointment Tuesday at 2pm. Goal: confirm or reschedule."
+- After the call is placed, tell the operator you've dialed and will follow up when it's done. The secretary is talking on the phone now — you are not on that call.
 
 After the operator confirms, call the tool with ALL required fields in a single call. Don't split across turns, don't omit fields. The tool has no memory between calls — it needs title, start_iso, and end_iso in the same call.
 
@@ -302,6 +309,42 @@ def build_delegator_tools() -> list[dict[str, Any]]:
                     },
                 },
                 "required": ["id"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "secretary_place_call",
+            "description": (
+                "Have the secretary place a REAL phone call on the operator's behalf. "
+                "Use when the operator says things like 'secretary, call the vet and confirm "
+                "Tuesday', 'call this number and tell them X', 'dial <number>'. The secretary "
+                "picks up from there and handles the conversation in their own voice. "
+                "CONFIRMATION REQUIRED — read the number and purpose back to the operator, "
+                "wait for 'yes'/'confirm'/'go ahead' before calling. Never place calls from "
+                "numbers the operator hasn't explicitly given or confirmed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": (
+                            "Phone number in E.164 format starting with '+' and country code, "
+                            "e.g. '+14105551234'. US numbers without '+1' must be normalized "
+                            "before calling."
+                        ),
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "Short standalone brief the secretary will use to guide the call — "
+                            "what the secretary is calling about, the operator's intent, what "
+                            "counts as success. The secretary reads this as context, not verbatim. "
+                            "Example: 'Confirming Matt\\'s dental appointment Tuesday at 2pm.'"
+                        ),
+                    },
+                },
+                "required": ["to", "context"],
             },
         },
         {
