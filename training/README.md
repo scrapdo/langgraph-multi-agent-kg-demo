@@ -93,7 +93,7 @@ Once you have a merged model dir:
 
 1. Serve it locally via `text-generation-inference`, `vLLM`, `llama.cpp`, or
    an OpenAI-compatible proxy like `litellm`.
-2. Point the brain at it by setting these in `~/.config/kg-multi-agent/secrets.env`:
+2. Point the brain at it by setting these in `~/.config/the-brain/secrets.env`:
 
    ```
    OPENAI_BASE_URL=http://127.0.0.1:8080/v1     # or wherever your local server listens

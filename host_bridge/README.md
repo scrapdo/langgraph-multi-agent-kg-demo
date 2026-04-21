@@ -30,12 +30,12 @@ pip install -r requirements.txt
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Store it in `~/.config/kg-multi-agent/secrets.env` as `HOST_AUTOMATION_TOKEN=<value>`. The main backend reads it from the same file.
+Store it in `~/.config/the-brain/secrets.env` as `HOST_AUTOMATION_TOKEN=<value>`. The main backend reads it from the same file.
 
 3. Start the bridge (bind only to localhost):
 
 ```bash
-export HOST_AUTOMATION_TOKEN="$(security find-generic-password -a "$USER" -s HOST_AUTOMATION_TOKEN -w 2>/dev/null || grep '^HOST_AUTOMATION_TOKEN=' ~/.config/kg-multi-agent/secrets.env | cut -d= -f2-)"
+export HOST_AUTOMATION_TOKEN="$(security find-generic-password -a "$USER" -s HOST_AUTOMATION_TOKEN -w 2>/dev/null || grep '^HOST_AUTOMATION_TOKEN=' ~/.config/the-brain/secrets.env | cut -d= -f2-)"
 export HOST_EXPORTS_ROOT="$HOME/Documents/new-project/backend/data/exports"
 uvicorn server:app --host 127.0.0.1 --port 8899 --reload
 ```

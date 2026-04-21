@@ -13,7 +13,7 @@ app, it:
 ## Prerequisites
 
 - **Docker Desktop** installed and running on macOS.
-- **Secrets file** at `~/.config/kg-multi-agent/secrets.env` (chmod 600)
+- **Secrets file** at `~/.config/the-brain/secrets.env` (chmod 600)
   containing at least `NEO4J_PASSWORD` and `POSTGRES_PASSWORD`.  
   See [`.env.example`](../.env.example) for the full list of variables.
 

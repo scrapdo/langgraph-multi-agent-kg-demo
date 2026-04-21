@@ -6,7 +6,7 @@ workflow, the expectations for a PR, and the commands you need to run locally.
 ## Quick start
 
 ```bash
-# 1. Put secrets in ~/.config/kg-multi-agent/secrets.env (chmod 600)
+# 1. Put secrets in ~/.config/the-brain/secrets.env (chmod 600)
 #    at minimum: NEO4J_PASSWORD, POSTGRES_PASSWORD, plus any provider keys.
 
 # 2. Copy the example project config
@@ -101,7 +101,7 @@ npm run dist        # produce release/mac-arm64/The Brain.app
 - No speculative abstractions. Three similar lines > premature helper.
 - No commented-out code. No `TODO`s without an owner and a date.
 - No commit of secrets, ever. Secrets live in
-  `~/.config/kg-multi-agent/secrets.env`.
+  `~/.config/the-brain/secrets.env`.
 
 ### Python
 
@@ -166,7 +166,7 @@ listed under *Development commands* above.
 See [SECURITY.md](SECURITY.md) for the full threat model and posture. The
 short version:
 
-- Never commit `.env` or anything under `~/.config/kg-multi-agent/`.
+- Never commit `.env` or anything under `~/.config/the-brain/`.
 - Never hand a raw path to `subprocess` / `osascript` without validation.
 - Any new side-effect tool must be gated by `SIDE_EFFECT_LIVE_TOOLS_CSV`
   and surface an operator-approval card.

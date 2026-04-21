@@ -26,13 +26,13 @@ Spotlight crawlers, backup agents, and other users of a shared machine.
 ## Controls in place
 
 ### Secrets
-- API keys and DB passwords live in `~/.config/kg-multi-agent/secrets.env`
+- API keys and DB passwords live in `~/.config/the-brain/secrets.env`
   (chmod 600), **not** in the project tree. The project `.env` holds only
   non-sensitive configuration (model IDs, base URLs, ports).
 - `.metadata_never_index` disables Spotlight indexing on the backups folder.
 - `.gitignore` excludes `.env*`, `*secrets*`, `*.pem`, `*.key`, and editor
   sidecar files. A `gitleaks` step runs on every CI build.
-- `~/.config/kg-multi-agent/` is chmod 700.
+- `~/.config/the-brain/` is chmod 700.
 
 ### Network surface
 - `docker-compose.yml` binds every exposed port (API, frontend, Neo4j,

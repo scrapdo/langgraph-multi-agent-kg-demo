@@ -15,7 +15,7 @@ You can reach your local brain from your iPhone or iPad by:
    ```
 
    This exposes both to any device on your WiFi. **Only do this on a trusted
-   network**, and keep `API_BEARER_TOKEN` set in `~/.config/kg-multi-agent/secrets.env`
+   network**, and keep `API_BEARER_TOKEN` set in `~/.config/the-brain/secrets.env`
    so random devices can't fire runs.
 
 2. **Allow your phone's origin for CORS.** In the project `.env`:

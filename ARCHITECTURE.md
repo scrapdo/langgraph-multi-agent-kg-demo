@@ -80,7 +80,7 @@ backend/app/
   agents/nodes.py            LangGraph node implementations (coordinator, researcher, critic, writer, specialists, degraded)
   api/routes.py              FastAPI route definitions (being split into per-domain packages)
   core/
-    config.py                Pydantic-settings Settings (two-file env load: project .env + ~/.config/kg-multi-agent/secrets.env)
+    config.py                Pydantic-settings Settings (two-file env load: project .env + ~/.config/the-brain/secrets.env)
     logging.py               JSON logging + request-ID middleware (ContextVar-based correlation)
   graph/                     AgentState + LangGraph wiring
   models/schemas.py          Pydantic API and profile schemas
@@ -164,7 +164,7 @@ Two-file env loading (see [backend/app/core/config.py](backend/app/core/config.p
 
 1. **`.env`** in the project tree — non-secret config only (model IDs, base
    URLs, feature flags, workflow tuning).
-2. **`~/.config/kg-multi-agent/secrets.env`** (chmod 600) — API keys, DB
+2. **`~/.config/the-brain/secrets.env`** (chmod 600) — API keys, DB
    passwords, bearer tokens.
 
 Values in the second file override the first. Env vars from the shell override
@@ -210,7 +210,7 @@ See [desktop/README.md](desktop/README.md) for the full flow. Key points:
 ## Non-obvious design choices
 
 - **Two-file env loading** — keys must not live in the project tree; they're
-  in `~/.config/kg-multi-agent/secrets.env` instead. Pydantic loads both,
+  in `~/.config/the-brain/secrets.env` instead. Pydantic loads both,
   with the secrets file winning conflicts.
 - **HUD as an effect layer, not a theme** — themes (dark/light) and effects
   (hud/off) are orthogonal. One token set, two axes of customization.

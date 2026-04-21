@@ -14,13 +14,13 @@ def _env_files() -> tuple[str, ...]:
     if secrets_override:
         candidates.append(secrets_override)
     else:
-        home_secrets = Path.home() / ".config" / "kg-multi-agent" / "secrets.env"
+        home_secrets = Path.home() / ".config" / "the-brain" / "secrets.env"
         candidates.append(str(home_secrets))
     return tuple(path for path in candidates if Path(path).expanduser().is_file())
 
 
 class Settings(BaseSettings):
-    app_name: str = "KG Multi-Agent Demo"
+    app_name: str = "The Brain"
     environment: str = "dev"
     app_timezone: str = "America/New_York"
 
