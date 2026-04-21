@@ -64,7 +64,6 @@ export function VoiceShell() {
   const [textInput, setTextInput] = useState('');
   const [faceOn, setFaceOn] = useState(false);
   const pendingCallsRef = useRef<Map<string, RealtimeToolCall>>(new Map());
-  const hasStartedRef = useRef(false);
 
   const pushTranscript = useCallback((role: TranscriptRole, text: string) => {
     const clean = text.trim();
@@ -246,12 +245,16 @@ export function VoiceShell() {
     },
   });
 
-  // Auto-connect on mount. The hook's own connectingRef guard handles React
-  // StrictMode's dev double-invoke, so we don't need to reset hasStartedRef
-  // in cleanup — doing so would let the second strict-mount fire a second start.
+  // Auto-connect on mount. Under React StrictMode (dev only), effects get
+  // mounted → cleaned up → mounted again to surface accidental state leaks.
+  // That means start() → stop() → start() in quick succession. The hook is
+  // idempotent against this: stop() fully tears down RTC/mic/data-channel
+  // state, and the second start() rebuilds from scratch. We intentionally do
+  // NOT guard with hasStartedRef — that guard only survived the first
+  // start/stop cycle and then silently skipped the real reconnect, leaving
+  // the UI stuck at state="idle" after any dev reload. Two sessions briefly
+  // open against OpenAI Realtime in dev is an acceptable tax.
   useEffect(() => {
-    if (hasStartedRef.current) return;
-    hasStartedRef.current = true;
     void realtime.start();
     return () => {
       realtime.stop();
