@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # coral, echo, sage, shimmer, verse. "ash" is warmer/more conversational than
     # "alloy" — good match for the chief-of-staff persona.
     openai_realtime_voice: str = "ash"
+    # Distinct voice for the telephony Secretary so she sounds different from
+    # the desktop Delegator. Female-leaning by default — common mental model
+    # for an executive secretary. Override in secrets.env if you want another
+    # (alloy, ash, ballad, coral, echo, sage, shimmer, verse).
+    openai_realtime_secretary_voice: str = "shimmer"
     tts_provider_default: str = "elevenlabs"
 
     anthropic_api_key: str = ""

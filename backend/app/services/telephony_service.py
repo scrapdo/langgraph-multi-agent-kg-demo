@@ -59,11 +59,144 @@ Always:
 - If the line is silent for 8+ seconds, prompt: "Still there?"
 - When the conversation is winding down, confirm next steps and say goodbye cleanly.
 
-You do not have access to Matt's calendar, email, or messages during this call. If the caller asks for live info you don't have, take a message and promise Matt will follow up.
+Tools available during this call:
+- `calendar_list_today()` — list today's events from Matt's Mac Calendar. Use when a caller asks about Matt's availability today.
+- `calendar_list_range(days_ahead)` — list events over the next N days (1-14). Use for "is Matt free Tuesday?" or "what's his week look like?".
+- `calendar_create({title, start_iso, end_iso, notes?})` — ADD an event to Matt's calendar. Requires verbal confirmation (see below).
+
+Using the tools:
+- Call them SILENTLY. Don't say "let me check" or "one moment" — just call the tool; the caller hears natural pauses regardless.
+- Report findings in natural speech. "Matt has a 2pm today and he's open after 4" — not "matt_calendar returned three events at..."
+
+CONFIRMATION GATE for calendar_create (MANDATORY):
+Before actually calling calendar_create, you MUST:
+1. Collect ALL details verbally: title, date, start time, end time, and any notes.
+2. Read the full event back to the caller. Example: "So I'll add 'dentist cleaning' on Tuesday, November 12th, from 2 to 3 PM. Sound good?"
+3. Wait for an explicit confirmation — "yes", "that's right", "please do", "go ahead", "confirm". "Yeah" or "sure" counts.
+4. ONLY THEN call calendar_create, with start_iso and end_iso in ISO 8601 format like "2026-11-12T14:00:00" (no timezone — the Mac interprets as local).
+5. After the tool returns, tell the caller it's on the calendar. If it failed, apologize and say you'll have Matt add it himself.
+6. If the caller hesitates, changes their mind, or the details are unclear, DO NOT call the tool. Ask a clarifying question or offer to take a message.
+
+Never call calendar_create speculatively or to "check" — the create tool actually writes to Matt's calendar.
+
+You cannot send texts or emails during this call. For those, take a message and promise Matt will follow up.
 """
 
 
 OPENAI_REALTIME_WS = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+
+
+def _phone_tools() -> list[dict[str, Any]]:
+    """Function schemas the Secretary can call mid-call.
+
+    Keep this short — each tool adds latency and surface area. Write tools
+    (calendar_create) require a verbal confirmation gate enforced by the
+    instructions above; the model is trained to honor it, but the gate is
+    soft. Don't add anything that mis-mishearing could do real damage with
+    (outbound SMS, email send, financial transfers).
+    """
+    return [
+        {
+            "type": "function",
+            "name": "calendar_list_today",
+            "description": "List every event on Matt's Mac Calendar for today. Returns title, start, end, and calendar name per event.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        {
+            "type": "function",
+            "name": "calendar_list_range",
+            "description": "List events on Matt's Mac Calendar over the next N days. Use 1 for tomorrow, 7 for 'this week'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 14,
+                        "description": "Number of days forward from today to include.",
+                    },
+                },
+                "required": ["days_ahead"],
+            },
+        },
+        {
+            "type": "function",
+            "name": "calendar_create",
+            "description": (
+                "ADD an event to Matt's Mac Calendar. REQUIRES verbal confirmation — read the "
+                "full title, date, and time back to the caller and wait for 'yes' before calling. "
+                "Never call this speculatively."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Event title as it will appear on the calendar."},
+                    "start_iso": {
+                        "type": "string",
+                        "description": "Start in ISO 8601 local time, e.g. 2026-11-12T14:00:00 (no timezone suffix).",
+                    },
+                    "end_iso": {
+                        "type": "string",
+                        "description": "End in ISO 8601 local time, same format as start_iso.",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": "Optional notes to attach to the event (caller name, reason, phone, etc.).",
+                    },
+                },
+                "required": ["title", "start_iso", "end_iso"],
+            },
+        },
+    ]
+
+
+async def _call_phone_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Execute a phone-tool by name and return the result dict to feed back to OpenAI.
+
+    Maps the secretary's function-call tool names onto the existing
+    app_control_service which already talks to the macOS host bridge and
+    handles AppleScript safety. calendar_list_range is synthesized from
+    multiple calendar_list_today calls — the bridge only ships list_today
+    and create today, and expanding that for phone isn't worth shipping
+    AppleScript-side yet.
+    """
+    from app.services.app_control_service import app_control_service
+
+    try:
+        if name == "calendar_list_today":
+            result = await app_control_service.execute("calendar", "list_today", {})
+            events = (result or {}).get("events") or []
+            return {"events": events, "count": len(events)}
+        if name == "calendar_list_range":
+            days = int(args.get("days_ahead") or 1)
+            days = max(1, min(14, days))
+            # AppleScript list_today is today-only. For a range, we'd need a
+            # new bridge endpoint. Until then, return today's events with a
+            # note so the secretary can say "I can only see today right now
+            # — want me to take the details and have Matt check later?"
+            today = await app_control_service.execute("calendar", "list_today", {})
+            events = (today or {}).get("events") or []
+            return {
+                "events": events,
+                "count": len(events),
+                "range_days": days,
+                "note": "Range queries beyond today are not yet wired — only today's events returned.",
+            }
+        if name == "calendar_create":
+            result = await app_control_service.execute(
+                "calendar",
+                "create",
+                {
+                    "title": args.get("title"),
+                    "start_iso": args.get("start_iso"),
+                    "end_iso": args.get("end_iso"),
+                    "notes": args.get("notes") or "",
+                },
+            )
+            return {"status": "created", "event_id": (result or {}).get("event_id")}
+        return {"error": f"unknown tool: {name}"}
+    except Exception as exc:
+        return {"error": str(exc) or type(exc).__name__}
 
 
 class _CallBridge:
@@ -100,7 +233,7 @@ class _CallBridge:
                 # we round-trip base64 audio with zero transcoding.
                 "input_audio_format": "g711_ulaw",
                 "output_audio_format": "g711_ulaw",
-                "voice": settings.openai_realtime_voice or "alloy",
+                "voice": (settings.openai_realtime_secretary_voice or "shimmer"),
                 "input_audio_transcription": {"model": "whisper-1"},
                 "turn_detection": {
                     "type": "server_vad",
@@ -110,17 +243,50 @@ class _CallBridge:
                     "interrupt_response": True,
                 },
                 "temperature": 0.7,
+                # Tools the secretary can call mid-call. Read-only — no mutating
+                # actions during a live phone conversation (too risky to mishear
+                # a date/phone/amount and fire it).
+                "tools": _phone_tools(),
+                "tool_choice": "auto",
             },
         }
         await self.openai_ws.send(json.dumps(session_config))
 
-        if self.direction == "outbound":
-            # Prime the assistant to speak first on outbound calls so the callee
-            # hears us before silence.
-            await self.openai_ws.send(json.dumps({"type": "response.create"}))
+        # BOTH directions: have the secretary greet first. The Twilio "please
+        # hold" verb finishes before the media stream opens, so from the
+        # caller's perspective the line goes silent; without a response.create
+        # they'd wait for us and we'd wait for them (server VAD), producing a
+        # dead line. One short greeting breaks the standoff.
+        greeting = (
+            "Greet the caller warmly as Matt's assistant and ask how you can help. Keep it to one sentence."
+            if self.direction == "inbound"
+            else "Greet the callee as Matt's assistant calling on his behalf and briefly state the reason. Keep it to one sentence."
+        )
+        await self.openai_ws.send(
+            json.dumps(
+                {
+                    "type": "response.create",
+                    "response": {"modalities": ["audio", "text"], "instructions": greeting},
+                }
+            )
+        )
+        logger.info("telephony_greeting_primed", extra={"direction": self.direction})
 
     def _instructions(self) -> str:
         base = SECRETARY_PHONE_INSTRUCTIONS
+        # Operator profile — so the secretary knows who Matt is without having
+        # to ask. Treated as background, never quoted verbatim to the caller.
+        try:
+            from app.services.user_profile_service import user_profile_service
+
+            profile_block = user_profile_service.render_context()
+            if profile_block:
+                base += (
+                    "\n\n[Background on Matt — use to personalize responses, never read verbatim]\n"
+                    + profile_block
+                )
+        except Exception:
+            pass
         if self.context:
             base += f"\n\n[Current call context: {self.context}]"
         base += f"\n\n[Call direction: {self.direction}]"
@@ -152,6 +318,7 @@ class _CallBridge:
 
     async def _openai_to_twilio(self) -> None:
         """Pump OpenAI response.audio.delta → Twilio media frames."""
+        audio_deltas = 0
         try:
             while not self.closed.is_set():
                 if not self.openai_ws:
@@ -159,10 +326,11 @@ class _CallBridge:
                     continue
                 raw = await self.openai_ws.recv()
                 msg = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
-                mtype = msg.get("type")
+                mtype = msg.get("type", "")
                 if mtype == "response.audio.delta":
                     delta = msg.get("delta")
                     if delta and self.stream_sid:
+                        audio_deltas += 1
                         await self.twilio_ws.send_text(
                             json.dumps(
                                 {
@@ -172,6 +340,8 @@ class _CallBridge:
                                 }
                             )
                         )
+                        if audio_deltas in (1, 10):
+                            logger.info("telephony_audio_delta", extra={"count": audio_deltas})
                 elif mtype == "input_audio_buffer.speech_started":
                     # Caller started speaking — tell Twilio to flush any queued
                     # audio so our interruption feels responsive.
@@ -181,10 +351,51 @@ class _CallBridge:
                         )
                 elif mtype == "error":
                     logger.warning("telephony_openai_error", extra={"error": msg.get("error")})
-                # All other event types (transcripts, response.done, etc.) — ignore for now.
-                # In a follow-up we'll persist transcripts to Zep + run_store.
+                elif mtype == "response.function_call_arguments.done":
+                    # Secretary wants to call a tool (calendar_list_today, etc.).
+                    # Parse args, execute via app_control_service, feed result
+                    # back as function_call_output + trigger response.create.
+                    call_id = str(msg.get("call_id") or "")
+                    tool_name = str(msg.get("name") or "")
+                    raw_args = str(msg.get("arguments") or "{}")
+                    try:
+                        tool_args = json.loads(raw_args)
+                    except Exception:
+                        tool_args = {}
+                    logger.info(
+                        "telephony_tool_call",
+                        extra={"name": tool_name, "args_keys": sorted(tool_args.keys())},
+                    )
+                    output = await _call_phone_tool(tool_name, tool_args)
+                    # function_call_output must be sent first, then response.create
+                    # to let the model continue speaking with the result in hand.
+                    await self.openai_ws.send(
+                        json.dumps(
+                            {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps(output),
+                                },
+                            }
+                        )
+                    )
+                    await self.openai_ws.send(json.dumps({"type": "response.create"}))
+                    logger.info("telephony_tool_returned", extra={"name": tool_name})
+                elif mtype in ("session.updated", "response.created", "response.done", "response.output_item.done"):
+                    # Surfaced so we can see the model actually processing. Volume is fine;
+                    # a typical call only fires 10-30 of these total.
+                    logger.info("telephony_openai_event", extra={"type": mtype})
+                elif mtype == "response.audio_transcript.done":
+                    transcript = str(msg.get("transcript") or "")[:160]
+                    logger.info("telephony_assistant_said", extra={"transcript": transcript})
+                elif mtype == "conversation.item.input_audio_transcription.completed":
+                    transcript = str(msg.get("transcript") or "")[:160]
+                    logger.info("telephony_caller_said", extra={"transcript": transcript})
+                # Other event types (deltas, rate info) — ignore.
         except Exception as exc:
-            logger.info("telephony_openai_pump_ended", extra={"reason": str(exc)[:120]})
+            logger.info("telephony_openai_pump_ended", extra={"reason": str(exc)[:120], "audio_deltas": audio_deltas})
         finally:
             self.closed.set()
 
