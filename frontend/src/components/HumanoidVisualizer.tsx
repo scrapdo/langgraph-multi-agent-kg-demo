@@ -75,14 +75,15 @@ function silhouetteMask(x: number, y: number): number {
         (1 - smoothstep(-0.15, -0.1, y) * 0.5)
       : 0;
 
-  // Shoulders: widening trapezoid from y=-0.1 to y=0.55.
+  // Shoulders: widening trapezoid from y=-0.1 (neck join) down to y=0.55.
+  // Max half-width 0.50 = total 1.0 = ~2.2× head width. Real-bust proportion.
   let inShoulders = 0;
-  if (y > -0.12 && y < 0.65) {
-    const t = (y + 0.12) / 0.77; // 0..1 down the shoulders
-    const halfWidth = 0.15 + t * 0.62; // neck width → shoulder span
+  if (y > -0.12 && y < 0.62) {
+    const t = (y + 0.12) / 0.74; // 0..1 down the shoulders
+    const halfWidth = 0.13 + t * 0.40; // neck width → shoulder span
     // Soft inside edge and bottom fade.
-    const edgeSoftness = 1 - smoothstep(halfWidth - 0.08, halfWidth, Math.abs(x));
-    const bottomFade = y > 0.4 ? 1 - smoothstep(0.4, 0.65, y) : 1;
+    const edgeSoftness = 1 - smoothstep(halfWidth - 0.07, halfWidth, Math.abs(x));
+    const bottomFade = y > 0.38 ? 1 - smoothstep(0.38, 0.62, y) : 1;
     if (Math.abs(x) < halfWidth) inShoulders = edgeSoftness * bottomFade;
   }
 
@@ -224,13 +225,23 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
 
       // --- Particles -----------------------------------------------------
       // Drift amplitude grows with audio — the figure "pulses" while speaking.
-      const driftScale = 0.008 + energy * 0.035;
+      const driftScale = 0.006 + energy * 0.025;
 
-      // Speaking bias: particles near the mouth region (y ~ 0.35 to 0.48 in
-      // base coords, but we inverted y for canvas — so use baseY ~ -0.38)
-      // get a little extra vertical jitter. Smooth, not stepped.
-      const mouthY = -0.4; // baseY of the mouth area inside the mask
-      const mouthRange = 0.12;
+      // Anatomical motion bands. Coordinates use SCREEN convention here:
+      // y < 0 is upper (head), y > 0 is lower (shoulders). The silhouette
+      // mask is built in the same convention, so we render with
+      // `py = cy + p.y * scale` — no flip — and the figure stays right-side-up.
+      const mouthMidY = -0.42;        // mouth horizontal centerline
+      const mouthBandHalf = 0.07;     // upper-lip / lower-lip split distance
+      const jawTopY = -0.36;
+      const jawBottomY = -0.18;
+
+      // Whole-head bob — a slow, low-amplitude wave that intensifies with
+      // speech. Gives the figure a hint of natural sway when talking.
+      const headBob = energy * 0.012 * Math.sin(t / 220);
+      // Quick syllable-timed micro-nod that fires on speech amplitude — adds
+      // cadence to the speaking motion so it doesn't feel like a constant pulse.
+      const syllableNod = currentState === 'speaking' ? energy * 0.018 * Math.sin(t / 95) : 0;
 
       ctx.globalCompositeOperation = 'lighter';
       for (const p of particles) {
@@ -240,16 +251,32 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
         p.x = p.baseX + dx;
         p.y = p.baseY + dy;
 
-        // Mouth particles wobble a hair extra when speaking.
+        // --- Anatomical speech motion ---
+        // Mouth: split-vertical opening. Particles ABOVE mouth midline rise
+        // (upper lip), particles BELOW fall (lower lip + jaw). Amplitude
+        // scales the gap, energy still drives it smoothly.
+        // Jaw: drops with speech beyond the mouth band (proxy for jaw rotation).
+        // Head: subtle bob + syllable nod, applied uniformly to head particles.
         let extraY = 0;
-        if (currentState === 'speaking' && Math.abs(p.baseY - mouthY) < mouthRange) {
-          const depth = 1 - Math.abs(p.baseY - mouthY) / mouthRange;
-          extraY = Math.sin(t / 110 + p.phaseA) * energy * 0.025 * depth;
+        if (currentState === 'speaking' || currentState === 'thinking') {
+          if (Math.abs(p.baseY - mouthMidY) < mouthBandHalf) {
+            const sign = p.baseY < mouthMidY ? -1 : 1; // upper goes up, lower goes down
+            const depth = 1 - Math.abs(p.baseY - mouthMidY) / mouthBandHalf;
+            extraY += sign * energy * 0.045 * depth;
+          } else if (p.baseY > jawTopY && p.baseY < jawBottomY) {
+            // Jaw band drops down with audio.
+            const depth = 1 - Math.abs(p.baseY - (jawTopY + jawBottomY) / 2) / ((jawBottomY - jawTopY) / 2);
+            extraY += Math.max(0, depth) * energy * 0.022;
+          }
+        }
+        // Head bob applies to all head particles (above neck).
+        if (p.baseY < -0.18) {
+          extraY += headBob + syllableNod;
         }
 
-        // Canvas y-axis points down; flip our base coords so "up" is up.
+        // Canvas y+ = down. Silhouette uses the same convention, so no flip.
         const px = cx + p.x * scale;
-        const py = cy - (p.y + extraY) * scale;
+        const py = cy + (p.y + extraY) * scale;
 
         // Brightness: mass (mask × rim light) × per-particle slow pulse × energy.
         const pulse = 0.7 + 0.3 * Math.sin(t / 900 + p.phaseA);
