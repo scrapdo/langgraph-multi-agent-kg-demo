@@ -30,7 +30,7 @@ interface Props {
 const RGB = { r: 110, g: 255, b: 145 };
 const BG = 'rgb(0, 0, 0)';
 
-const PARTICLE_COUNT = 520;
+const PARTICLE_COUNT = 780;
 
 interface Particle {
   x: number;          // current position, normalized -1..1
@@ -61,33 +61,15 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 }
 
 function silhouetteMask(x: number, y: number): number {
-  // Head: ellipse centered at (0, -0.55), rx=0.28, ry=0.34.
-  const headDx = x / 0.28;
-  const headDy = (y + 0.55) / 0.34;
-  const headR = headDx * headDx + headDy * headDy;
-  const inHead = headR < 1 ? 1 - smoothstep(0.65, 1.0, headR) : 0;
-
-  // Neck: narrow column, y from -0.28 to -0.12.
-  const inNeck =
-    y > -0.3 && y < -0.1
-      ? (1 - smoothstep(0.08, 0.14, Math.abs(x))) *
-        smoothstep(-0.3, -0.24, y) *
-        (1 - smoothstep(-0.15, -0.1, y) * 0.5)
-      : 0;
-
-  // Shoulders: widening trapezoid from y=-0.1 (neck join) down to y=0.55.
-  // Max half-width 0.50 = total 1.0 = ~2.2× head width. Real-bust proportion.
-  let inShoulders = 0;
-  if (y > -0.12 && y < 0.62) {
-    const t = (y + 0.12) / 0.74; // 0..1 down the shoulders
-    const halfWidth = 0.13 + t * 0.40; // neck width → shoulder span
-    // Soft inside edge and bottom fade.
-    const edgeSoftness = 1 - smoothstep(halfWidth - 0.07, halfWidth, Math.abs(x));
-    const bottomFade = y > 0.38 ? 1 - smoothstep(0.38, 0.62, y) : 1;
-    if (Math.abs(x) < halfWidth) inShoulders = edgeSoftness * bottomFade;
-  }
-
-  return Math.max(inHead, inNeck, inShoulders);
+  // Face only — no neck or shoulders. Round, slightly tall (rx 0.55, ry 0.62)
+  // so it reads as a head while overall outline stays orb-ish like Perplexity's.
+  // Center at (0, 0): the face fills the canvas center cleanly.
+  const headDx = x / 0.55;
+  const headDy = y / 0.62;
+  const r = headDx * headDx + headDy * headDy;
+  if (r > 1) return 0;
+  // Soft feather only at the very edge so dots fade into the void.
+  return 1 - smoothstep(0.85, 1.0, r);
 }
 
 // --- Per-figure rim lighting so the head reads as 3-D, not a flat oval ----
@@ -227,14 +209,12 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
       // Drift amplitude grows with audio — the figure "pulses" while speaking.
       const driftScale = 0.006 + energy * 0.025;
 
-      // Anatomical motion bands. Coordinates use SCREEN convention here:
-      // y < 0 is upper (head), y > 0 is lower (shoulders). The silhouette
-      // mask is built in the same convention, so we render with
-      // `py = cy + p.y * scale` — no flip — and the figure stays right-side-up.
-      const mouthMidY = -0.42;        // mouth horizontal centerline
-      const mouthBandHalf = 0.07;     // upper-lip / lower-lip split distance
-      const jawTopY = -0.36;
-      const jawBottomY = -0.18;
+      // Anatomical motion bands. Face is now centered at (0, 0). Screen
+      // convention: y < 0 = upper face, y > 0 = lower face/jaw.
+      const mouthMidY = 0.22;         // mouth horizontal centerline (lower face)
+      const mouthBandHalf = 0.07;     // upper-lip / lower-lip split
+      const jawTopY = 0.32;
+      const jawBottomY = 0.55;
 
       // Whole-head bob — a slow, low-amplitude wave that intensifies with
       // speech. Gives the figure a hint of natural sway when talking.
@@ -269,8 +249,11 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
             extraY += Math.max(0, depth) * energy * 0.022;
           }
         }
-        // Head bob applies to all head particles (above neck).
-        if (p.baseY < -0.18) {
+        // Head bob applies to upper-face particles (forehead, eyes, nose).
+        // Lower face / mouth / jaw have their own motion bands above and
+        // shouldn't get the bob layered on top — that would feel like the
+        // mouth fights the jaw.
+        if (p.baseY < 0.10) {
           extraY += headBob + syllableNod;
         }
 
@@ -280,20 +263,15 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
 
         // Brightness: mass (mask × rim light) × per-particle slow pulse × energy.
         const pulse = 0.7 + 0.3 * Math.sin(t / 900 + p.phaseA);
-        const brightness = p.mass * pulse * (0.55 + energy * 0.55);
+        const brightness = p.mass * pulse * (0.65 + energy * 0.5);
 
-        // Radial-gradient "dot" so overlaps add up into a soft glow.
-        const r = Math.max(1.5, scale * 0.012) * (1 + energy * 0.4);
-        const grad = ctx.createRadialGradient(px, py, 0, px, py, r * 2.2);
-        grad.addColorStop(0, `rgba(${RGB.r}, ${RGB.g}, ${RGB.b}, ${Math.min(1, brightness).toFixed(3)})`);
-        grad.addColorStop(
-          0.45,
-          `rgba(${RGB.r}, ${RGB.g}, ${RGB.b}, ${Math.min(1, brightness * 0.45).toFixed(3)})`,
-        );
-        grad.addColorStop(1, `rgba(${RGB.r}, ${RGB.g}, ${RGB.b}, 0)`);
-        ctx.fillStyle = grad;
+        // Crisp small dots — solid fill, no per-dot glow gradient. The orb
+        // glow comes from the outer aura layered behind, not from each dot
+        // bleeding into its neighbours. Keeps the face shape readable.
+        const r = Math.max(0.9, scale * 0.0055);
+        ctx.fillStyle = `rgba(${RGB.r}, ${RGB.g}, ${RGB.b}, ${Math.min(1, brightness).toFixed(3)})`;
         ctx.beginPath();
-        ctx.arc(px, py, r * 2.2, 0, Math.PI * 2);
+        ctx.arc(px, py, r, 0, Math.PI * 2);
         ctx.fill();
       }
 
