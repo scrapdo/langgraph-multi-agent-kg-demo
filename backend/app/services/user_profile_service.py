@@ -14,6 +14,8 @@ _DEFAULT_PROFILE: dict[str, Any] = {
     "role": "",
     "timezone": "America/New_York",
     "location": "",
+    "phone": "",       # operator's personal callback number (E.164, e.g. +14155551234)
+    "email": "",       # operator's primary email
     "goals": [],
     "preferences": "",
     "current_focus": "",
@@ -92,6 +94,15 @@ class UserProfileService:
             lines.append(f"They are located in {profile['location']}.")
         if profile.get("timezone"):
             lines.append(f"Timezone: {profile['timezone']}.")
+        if profile.get("phone"):
+            lines.append(
+                f"Operator's callback phone number: {profile['phone']} (E.164). "
+                "When they say 'call me', 'have Emma call me', 'dial my number', "
+                "use THIS number as the `to` argument to secretary_place_call. "
+                "No need to ask — it's already on file."
+            )
+        if profile.get("email"):
+            lines.append(f"Operator's primary email: {profile['email']}.")
         if profile.get("current_focus"):
             lines.append(f"Current focus: {profile['current_focus']}.")
         goals = profile.get("goals") or []

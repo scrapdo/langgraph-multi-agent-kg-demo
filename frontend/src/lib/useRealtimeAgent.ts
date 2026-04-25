@@ -148,10 +148,30 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
         case 'input_audio_buffer.speech_stopped':
           updateState('thinking');
           break;
+        // Multiple event types signal "AI is producing audio output." The
+        // historic `response.audio.delta` event no longer fires reliably
+        // when WebRTC carries the audio (OpenAI moved binary delivery to
+        // the audio track). Listen for any audio-output event so the
+        // visualizer transitions to 'speaking'.
+        //
+        // CRITICAL: only transition to 'speaking' from 'idle' or
+        // 'thinking'. If the current state is 'listening' (operator is
+        // mid-utterance), DO NOT override — the operator is interrupting
+        // and the server is about to cancel this response. Overriding
+        // would make the visualizer flicker back to 'speaking' for each
+        // straggling event before the cancel takes effect.
         case 'response.audio.delta':
-          if (stateRef.current !== 'speaking') updateState('speaking');
+        case 'response.output_audio.delta':
+        case 'response.output_audio_buffer.started':
+        case 'output_audio_buffer.started': {
+          const cur = stateRef.current;
+          if (cur === 'idle' || cur === 'thinking') updateState('speaking');
           break;
-        case 'response.audio_transcript.delta': {
+        }
+        case 'response.audio_transcript.delta':
+        case 'response.output_audio_transcript.delta': {
+          const cur = stateRef.current;
+          if (cur === 'idle' || cur === 'thinking') updateState('speaking');
           const delta = String((msg as { delta?: string }).delta ?? '');
           if (delta) partialAssistantRef.current += delta;
           break;

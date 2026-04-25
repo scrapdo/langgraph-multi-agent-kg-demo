@@ -1872,7 +1872,7 @@ async def update_user_profile(payload: dict) -> dict:
     cleaned = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Profile payload must be an object.")
-    allowed = ("name", "role", "timezone", "location", "goals", "preferences", "current_focus", "notes")
+    allowed = ("name", "role", "timezone", "location", "phone", "email", "goals", "preferences", "current_focus", "notes")
     for key in allowed:
         if key in payload:
             cleaned[key] = payload[key]

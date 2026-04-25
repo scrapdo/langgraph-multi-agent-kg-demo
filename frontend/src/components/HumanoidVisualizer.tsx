@@ -1,170 +1,201 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { cn } from '../ui/cn';
 
 export type VisualizerState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
 interface Props {
   state: VisualizerState;
-  /** 0-1 live audio level. Drives aura pulse and dot brightness. */
+  /** 0-1 live audio level. Modulates ring brightness/pulse. */
   level?: number;
   className?: string;
 }
 
-// --- Visualizer brief ------------------------------------------------------
-//   * Like Perplexity's voice orb: soft-glowing, smoothly pulsing, ethereal
-//   * But in a HEAD-AND-SHOULDERS silhouette, not a sphere
-//   * Retro phosphor green on pure black
-//   * Mysterious: the figure emerges from darkness, never fully illuminated
+// ============================================================================
+// Visualizer = "holographic energy ring"
 //
-// How it works:
-//   1. A luminance mask defines the silhouette (head + neck + shoulders).
-//   2. ~520 particles are sampled from the mask, weighted by local density.
-//   3. Each frame, every particle drifts slowly along a per-particle flow
-//      field (sin-wave velocities). Nothing snaps — everything eases.
-//   4. Particles are drawn with additive blending and a radial falloff, so
-//      overlaps brighten naturally and the form has a glowing inner core.
-//   5. A wide outer aura pulses with amplitude (Perplexity's defining move).
-//   6. Speaking intensifies the drift and brightens rim-close dots; blinking
-//      isn't a thing here — the whole image is too soft for binary events.
+// Ported from "holographic energy ring" by fagimli, published 2026-04-25
+// at https://www.shadertoy.com/view/sfSSRd. The shader builds a glowing
+// pink core ring with chromatic dispersion, a wider blue halo, an
+// animated LED grid in polar coords, and a soft outer glow.
+//
+// Re-used here under Shadertoy's default license terms (CC BY-NC-SA 3.0
+// equivalent — non-commercial attribution share-alike). See LICENSE-NOTES.md
+// in this project for license tracking of imported assets.
+//
+// Modulation added on top of the original shader:
+//   - u_intensity: ramps the entire color buffer from ~0.10 (idle ember)
+//     up to 1.00 when active. Speaking and listening both bring it up so
+//     the operator can see the ring respond to their voice too.
+//   - u_energy: live audio level, drives a subtle radial pulse + extra
+//     LED brightness when sound is happening.
+// ============================================================================
 
-const RGB = { r: 110, g: 255, b: 145 };
-const BG = 'rgb(0, 0, 0)';
+const VERT_SRC = /* glsl */ `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
 
-const PARTICLE_COUNT = 780;
+const FRAG_SRC = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 outColor;
 
-type ParticleZone = 'face' | 'eye-l' | 'eye-r' | 'mouth' | 'jaw';
+uniform float u_time;
+uniform vec2  u_resolution;
+uniform float u_intensity;
+uniform float u_energy;
 
-interface Particle {
-  x: number;          // current position, normalized -1..1
-  y: number;
-  baseX: number;      // spring-target position (anchors the silhouette)
-  baseY: number;
-  /** 0-1 local mask density at baseX,baseY — dense where the figure is lit,
-   *  sparse where it fades into shadow. Drives per-particle brightness. */
-  mass: number;
-  /** Per-particle drift frequency and phase for the smooth flow field. */
-  fxA: number; fyA: number; fxB: number; fyB: number;
-  phaseA: number; phaseB: number;
-  /** Anatomical zone — drives targeted motion (mouth speech, eye blinks). */
-  zone: ParticleZone;
+float hash12(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
 }
 
-// --- Human silhouette mask -------------------------------------------------
-// x,y are in [-1,1] space. Returns 0-1 density: 1 inside and lit, 0 outside
-// or in deep shadow. Shape is a front-facing bust — head, neck tapering into
-// shoulders. Edges feathered so particles near the boundary are dimmer,
-// giving the "emerges from darkness" feeling automatically.
-
-function clamp01(v: number): number {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
+float ringMask(float rr, float rad, float halfWidth, float aa) {
+  return 1.0 - smoothstep(halfWidth, halfWidth + aa, abs(rr - rad));
 }
 
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = clamp01((x - edge0) / (edge1 - edge0));
-  return t * t * (3 - 2 * t);
+float radialBand(float rr, float r0, float r1, float aa) {
+  return smoothstep(r0 - aa, r0 + aa, rr) * (1.0 - smoothstep(r1 - aa, r1 + aa, rr));
 }
 
-function silhouetteMask(x: number, y: number): number {
-  // Face only — no neck or shoulders. Round, slightly tall (rx 0.55, ry 0.62)
-  // so it reads as a head while overall outline stays orb-ish like Perplexity's.
-  // Center at (0, 0): the face fills the canvas center cleanly.
-  const headDx = x / 0.55;
-  const headDy = y / 0.62;
-  const r = headDx * headDx + headDy * headDy;
-  if (r > 1) return 0;
-  // Soft feather only at the very edge so dots fade into the void.
-  return 1 - smoothstep(0.85, 1.0, r);
+float ledMask(float rr, float aa, float t, float aaR) {
+  float twistA = aa + sin(rr * 10.0 - t) * 0.1;
+
+  vec2 st = vec2(rr, twistA);
+
+  float acell = floor(st.y * 32.0) / 32.0;
+  float af = fract(st.y * 32.0);
+
+  float aaA = max(fwidth(st.y * 32.0), 0.002);
+
+  float angularBlock = smoothstep(0.80, 0.80 + aaA * 1.5, af) *
+                       (1.0 - smoothstep(0.965 - aaA * 1.5, 0.965, af));
+
+  float trail = pow(fract(aa * 5.0 + t), 3.0);
+
+  float stretch = 0.018 + trail * 0.075;
+  float band = radialBand(rr, 0.33, 0.37 + stretch, aaR * 1.5);
+
+  float rf = fract((rr - 0.33) * 185.0 - trail * 2.2);
+  float radialDots = smoothstep(0.10, 0.18, rf) *
+                     (1.0 - smoothstep(0.58, 0.78, rf));
+
+  float flicker = 0.55 + 0.45 * sin(acell * 71.0 + sin(acell * 19.0) * 4.0 + t * 5.0);
+  float clusters = smoothstep(0.18, 0.82, 0.5 + 0.5 * sin(acell * 13.0 - t * 1.6));
+  float sweep = smoothstep(0.15, 0.95, fract(aa * 0.23 - t * 0.10 + sin(aa * 3.0) * 0.05));
+
+  return angularBlock * radialDots * band * mix(0.35, 1.25, flicker) * mix(0.55, 1.0, clusters) * (0.45 + 0.75 * sweep);
 }
 
-// Anatomical zone classifier. Eyes / mouth / jaw / face. Drives targeted
-// motion in the render loop — eye blinks, mouth speech vibrato, etc. Coords
-// are the same -1..1 mask space used everywhere else in this file.
-const EYE_Y = -0.12;
-const EYE_RX = 0.10;
-const EYE_RY = 0.07;
-const EYE_LX = -0.18;
-const EYE_RX_X = 0.18;
-const MOUTH_MID_Y = 0.22;
-const MOUTH_HALF = 0.07;
-const JAW_TOP_Y = 0.32;
-const JAW_BOTTOM_Y = 0.55;
+void main() {
+  // Convert v_uv (clip-space [-1,1]) into Shadertoy's centered uv where
+  // y ranges [-0.5, 0.5] and x scales with aspect. This is the convention
+  // the original shader was written against.
+  float aspect = u_resolution.x / max(1.0, u_resolution.y);
+  vec2 uv = v_uv * 0.5;
+  uv.x *= aspect;
 
-function zoneFor(x: number, y: number): ParticleZone {
-  const ldx = (x - EYE_LX) / EYE_RX;
-  const ldy = (y - EYE_Y) / EYE_RY;
-  if (ldx * ldx + ldy * ldy < 1) return 'eye-l';
-  const rdx = (x - EYE_RX_X) / EYE_RX;
-  const rdy = (y - EYE_Y) / EYE_RY;
-  if (rdx * rdx + rdy * rdy < 1) return 'eye-r';
-  if (Math.abs(y - MOUTH_MID_Y) < MOUTH_HALF) return 'mouth';
-  if (y > JAW_TOP_Y && y < JAW_BOTTOM_Y) return 'jaw';
-  return 'face';
+  float t = u_time;
+
+  // SIZE ENVELOPE — the ring grows with state intensity. Dividing r by
+  // this scale makes the ring's apparent radius grow proportionally.
+  // 0.15 (idle, ~15% of full size) → 1.0 (speaking, full size). Audio
+  // bursts briefly inflate the ring on loud syllables.
+  float scale = 0.15 + 0.85 * u_intensity + 0.10 * u_energy;
+  float r = length(uv) / scale;
+  float a = atan(uv.y, uv.x);
+
+  a += t * 0.8;
+  // Original radial breathing + amplified audio-driven pulse so the ring
+  // visibly throbs with each syllable, not subtly.
+  r += sin(t * 2.0) * 0.02 + u_energy * 0.030;
+
+  float aaR = max(fwidth(r), 0.0012);
+
+  vec3 col = vec3(0.0);
+
+  float rR = r;
+  float rG = r * 1.02;
+  float rB = r * 1.04;
+
+  float ringR = ringMask(rR, 0.35, 0.010, aaR);
+  float ringG = ringMask(rG, 0.35, 0.010, aaR);
+  float ringB = ringMask(rB, 0.35, 0.010, aaR);
+
+  vec3 corePink = vec3(1.0, 0.3, 0.8) * 2.0;
+  vec3 sharpPink = vec3(1.0, 0.2, 0.7);
+
+  col += corePink * vec3(ringR, ringG, ringB);
+  col += sharpPink * 1.25 * ringMask(r, 0.348, 0.0045, aaR);
+
+  float glowR = exp(-abs(rR - 0.38) * 15.0);
+  float glowG = exp(-abs(rG - 0.38) * 15.0);
+  float glowB = exp(-abs(rB - 0.38) * 15.0);
+
+  vec3 outerBlue = vec3(0.2, 0.4, 1.0);
+  vec3 edgeBlue = vec3(0.1, 0.5, 1.0);
+
+  col += outerBlue * vec3(glowR, glowG, glowB) * 0.85;
+  col += edgeBlue * exp(-abs(r - 0.405) * 32.0) * 1.15;
+
+  float halo = exp(-abs(r - 0.39) * 8.5) * smoothstep(0.21, 0.46, r) * (1.0 - smoothstep(0.60, 0.85, r));
+  col += vec3(0.18, 0.08, 0.9) * halo * 0.85;
+
+  float ledR = ledMask(r * 0.995, a, t, aaR);
+  float ledG = ledMask(r * 1.010, a, t, aaR);
+  float ledB = ledMask(r * 1.030, a, t, aaR);
+
+  vec3 ledCA = vec3(ledR, ledG, ledB);
+  vec3 ledColor = vec3(1.0, 0.68, 0.95) * ledR * 1.35 +
+                  vec3(0.28, 0.65, 1.0) * ledCA * 1.75 +
+                  vec3(1.0, 0.95, 0.78) * min(ledR, min(ledG, ledB)) * 1.15;
+
+  // Audio-driven LED brightness boost — voice activity clearly intensifies
+  // the dot matrix.
+  col += ledColor * (1.0 + u_energy * 1.4);
+
+  // Audio-reactive outer halo — a wider, softer pink/blue glow that
+  // expands outward when the voice is loud. Adds the "ring breathing
+  // outward with each syllable" feel.
+  float reactiveGlow = exp(-abs(r - 0.42) * 6.5) * u_energy * 1.2;
+  col += vec3(0.55, 0.30, 0.95) * reactiveGlow;
+
+  float trail = pow(fract(a * 5.0 + t), 3.0);
+  float trailGlow = exp(-abs(r - (0.37 + trail * 0.045)) * 38.0);
+  float polarBits = smoothstep(0.78, 0.98, fract((a + sin(r * 10.0 - t) * 0.1) * 32.0));
+  col += vec3(0.25, 0.55, 1.0) * trailGlow * polarBits * trail * 0.75;
+
+  float innerGhost = exp(-abs(r - 0.30) * 22.0) * (0.5 + 0.5 * sin(a * 6.0 + t * 1.7));
+  col += vec3(0.05, 0.0, 0.08) * innerGhost;
+
+  float fineDash = ringMask(r, 0.333, 0.0022, aaR);
+  float dashF = fract((a + sin(r * 10.0 - t) * 0.1) * 58.0);
+  float dash = smoothstep(0.08, 0.14, dashF) * (1.0 - smoothstep(0.36, 0.46, dashF));
+  col += vec3(1.0, 0.45, 0.85) * fineDash * dash * 1.45;
+
+  float vignette = smoothstep(0.95, 0.15, length(uv));
+  col *= vignette;
+
+  float grain = hash12(v_uv * u_resolution.xy + fract(t) * 173.13) - 0.5;
+  col += grain * 0.018 * smoothstep(0.05, 0.5, length(col));
+
+  // Final intensity envelope — fades the whole ring down when the voice
+  // agent is idle and back up when active. Smoothed in JS so transitions
+  // feel graceful.
+  outColor = vec4(col * u_intensity, 1.0);
 }
-
-// --- Per-figure rim lighting so the head reads as 3-D, not a flat oval ----
-// Light from upper-left. Rim-lit figures are the whole mysterious-sci-fi
-// look — bright on one side, dissolving into dark on the other.
-function rimLight(x: number, y: number): number {
-  const lightX = -0.7;
-  const lightY = -0.9;
-  // Treat silhouette as a rough sphere for normal estimation.
-  const r2 = x * x + y * y;
-  if (r2 > 1.2) return 0;
-  const nz = Math.sqrt(Math.max(0.0001, 1.2 - r2));
-  const dot = x * lightX + y * lightY + nz * 0.35;
-  return clamp01(dot * 0.8 + 0.18);
-}
-
-// --- Particle sampling -----------------------------------------------------
-function seeded(seed: number): () => number {
-  let s = seed | 0;
-  return () => {
-    s = (s * 1664525 + 1013904223) | 0;
-    return ((s >>> 0) % 100000) / 100000;
-  };
-}
-
-function generateParticles(): Particle[] {
-  const rand = seeded(20260422);
-  const out: Particle[] = [];
-  // Rejection sampling across [-1,1]×[-1,1] weighted by silhouette mask.
-  let attempts = 0;
-  while (out.length < PARTICLE_COUNT && attempts < 20000) {
-    attempts += 1;
-    const x = rand() * 2 - 1;
-    const y = rand() * 2 - 1;
-    const mask = silhouetteMask(x, y);
-    if (mask < 0.02) continue;
-    const lit = rimLight(x, y);
-    // Keep with probability mask × lit (weighted toward lit-side dense regions).
-    const p = mask * (0.3 + 0.7 * lit);
-    if (rand() > p) continue;
-    out.push({
-      x,
-      y,
-      baseX: x,
-      baseY: y,
-      mass: p,
-      fxA: 0.00035 + rand() * 0.00045,
-      fyA: 0.00028 + rand() * 0.00045,
-      fxB: 0.00070 + rand() * 0.00060,
-      fyB: 0.00090 + rand() * 0.00070,
-      phaseA: rand() * Math.PI * 2,
-      phaseB: rand() * Math.PI * 2,
-      zone: zoneFor(x, y),
-    });
-  }
-  return out;
-}
-
-// --- Component -------------------------------------------------------------
+`;
 
 export function HumanoidVisualizer({ state, level, className }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rafRef = useRef<number | null>(null);
-  const displayLevelRef = useRef<number>(0);
   const stateRef = useRef<VisualizerState>(state);
   const levelRef = useRef<number | undefined>(level);
+  const intensityRef = useRef(0);
+  const energyRef = useRef(0);
 
   useEffect(() => {
     stateRef.current = state;
@@ -173,168 +204,121 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
     levelRef.current = level;
   }, [level]);
 
-  const particles = useMemo(generateParticles, []);
-
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    const gl = canvas.getContext('webgl2', { antialias: true });
+    if (!gl) return;
+
+    const compile = (type: number, src: string): WebGLShader | null => {
+      const sh = gl.createShader(type);
+      if (!sh) return null;
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        // eslint-disable-next-line no-console
+        console.error('Visualizer shader compile error:', gl.getShaderInfoLog(sh));
+        gl.deleteShader(sh);
+        return null;
+      }
+      return sh;
+    };
+
+    const vert = compile(gl.VERTEX_SHADER, VERT_SRC);
+    const frag = compile(gl.FRAGMENT_SHADER, FRAG_SRC);
+    if (!vert || !frag) return;
+
+    const prog = gl.createProgram();
+    if (!prog) return;
+    gl.attachShader(prog, vert);
+    gl.attachShader(prog, frag);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      // eslint-disable-next-line no-console
+      console.error('Visualizer program link error:', gl.getProgramInfoLog(prog));
+      return;
+    }
+
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
+      gl.STATIC_DRAW,
+    );
+    const aPos = gl.getAttribLocation(prog, 'a_pos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+    const uTime = gl.getUniformLocation(prog, 'u_time');
+    const uRes = gl.getUniformLocation(prog, 'u_resolution');
+    const uIntensity = gl.getUniformLocation(prog, 'u_intensity');
+    const uEnergy = gl.getUniformLocation(prog, 'u_energy');
 
     const resize = () => {
       const { width, height } = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
       canvas.width = Math.max(1, Math.floor(width * dpr));
       canvas.height = Math.max(1, Math.floor(height * dpr));
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      gl.viewport(0, 0, canvas.width, canvas.height);
     };
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
+    let raf = 0;
     const draw = (t: number) => {
-      const { width, height } = canvas.getBoundingClientRect();
+      const cur = stateRef.current;
+      // Intensity envelope. Drives the ring's SIZE (via scale uniform)
+      // AND brightness. Idle = small dim ember, speaking = full size +
+      // full brightness. Smoothing rate (0.06) is gentle so the size
+      // change reads as the ring "growing" rather than snapping.
+      const targetIntensity =
+        cur === 'speaking' ? 1.0
+        : cur === 'listening' ? 0.92
+        : cur === 'thinking' ? 0.65
+        : 0.0;     // idle = collapsed/dormant
+      intensityRef.current += (targetIntensity - intensityRef.current) * 0.06;
 
-      // Fully clear each frame — no trails, clean look like Perplexity's orb.
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.fillStyle = BG;
-      ctx.fillRect(0, 0, width, height);
+      // Audio energy: VoiceShell passes max(inputLevel, outputLevel) so
+      // this fires whether the operator or the AI is speaking. Mic levels
+      // typically read 0.05-0.2; amplifying by 4× pushes them into a
+      // 0..1 range that produces clearly-visible ring expansion.
+      const live = levelRef.current;
+      const haveLive = typeof live === 'number' && Number.isFinite(live);
+      const targetEnergy = haveLive
+        ? Math.max(0, Math.min(1, live * 4.0))
+        : 0.0;
+      // Snappier smoothing on energy so per-syllable bursts read as
+      // discrete pulses instead of getting averaged out.
+      energyRef.current += (targetEnergy - energyRef.current) * 0.30;
 
-      const currentState = stateRef.current;
-      const liveLevel = levelRef.current;
+      gl.useProgram(prog);
+      gl.bindVertexArray(vao);
+      gl.uniform1f(uTime, t / 1000);
+      gl.uniform2f(uRes, canvas.width, canvas.height);
+      gl.uniform1f(uIntensity, intensityRef.current);
+      gl.uniform1f(uEnergy, energyRef.current);
 
-      // Smooth the audio level — Perplexity's blob reacts continuously, not
-      // stepwise. Higher exponent = "snappier" reaction.
-      const targetLevel =
-        typeof liveLevel === 'number' && Number.isFinite(liveLevel)
-          ? Math.max(0, Math.min(1, liveLevel))
-          : currentState === 'speaking' ? 0.45 + 0.22 * Math.sin(t / 250)
-          : currentState === 'thinking' ? 0.28 + 0.1 * Math.sin(t / 420)
-          : currentState === 'listening' ? 0.18 + 0.06 * Math.sin(t / 560)
-          : 0.07 + 0.04 * Math.sin(t / 740);
-      displayLevelRef.current += (targetLevel - displayLevelRef.current) * 0.15;
-      const energy = displayLevelRef.current;
-
-      const cx = width / 2;
-      const cy = height / 2;
-      const scale = Math.min(width, height) * 0.44;
-
-      // --- Outer aura (the Perplexity signature move) --------------------
-      // Three concentric radial gradients that breathe with amplitude. Drawn
-      // BEFORE particles so they layer underneath.
-      ctx.globalCompositeOperation = 'lighter';
-      for (let i = 0; i < 3; i++) {
-        const r = scale * (1.4 + i * 0.7 + energy * (0.7 + i * 0.3));
-        const grad = ctx.createRadialGradient(cx, cy, scale * 0.2, cx, cy, r);
-        const alpha = (0.12 - i * 0.035) * (0.55 + energy * 0.9);
-        grad.addColorStop(0, `rgba(${RGB.r}, ${RGB.g}, ${RGB.b}, ${alpha.toFixed(3)})`);
-        grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // --- Particles -----------------------------------------------------
-      // Drift amplitude grows with audio — the figure "pulses" while speaking.
-      const driftScale = 0.006 + energy * 0.025;
-
-      // Whole-head bob — a slow, low-amplitude wave that intensifies with
-      // speech. Gives the figure a hint of natural sway when talking.
-      const headBob = energy * 0.012 * Math.sin(t / 220);
-      // Quick syllable-timed micro-nod that fires on speech amplitude — adds
-      // cadence to the speaking motion so it doesn't feel like a constant pulse.
-      const syllableNod = currentState === 'speaking' ? energy * 0.018 * Math.sin(t / 95) : 0;
-
-      // --- Eye expression: blinks + slow gaze drift. Both run all the time
-      // (idle / listening / thinking / speaking) so the figure feels alive
-      // even when silent. Blink is a brief alpha dip on eye-zone dots; gaze
-      // is a tiny xy translation across both eyes together.
-      const blinkCycle = (t % 5200) / 5200;            // every 5.2s
-      const blink = blinkCycle < 0.04
-        ? 1 - Math.abs(blinkCycle - 0.02) / 0.02       // 0..1..0 over ~210ms
-        : 0;
-      const gazeX = Math.sin(t / 3700) * 0.006 + Math.sin(t / 5300) * 0.003;
-      const gazeY = Math.sin(t / 4200) * 0.003;
-
-      const speaking = currentState === 'speaking';
-      const speechActive = speaking || currentState === 'thinking';
-
-      ctx.globalCompositeOperation = 'lighter';
-      for (const p of particles) {
-        // Smooth flow-field drift.
-        const dx = (Math.sin(t * p.fxA + p.phaseA) + 0.5 * Math.sin(t * p.fxB + p.phaseB)) * driftScale;
-        const dy = (Math.cos(t * p.fyA + p.phaseA) + 0.5 * Math.sin(t * p.fyB + p.phaseB)) * driftScale;
-        p.x = p.baseX + dx;
-        p.y = p.baseY + dy;
-
-        // --- Zone-specific motion ---
-        let extraX = 0;
-        let extraY = 0;
-        let alphaMul = 1;
-
-        if (p.zone === 'mouth' && speechActive) {
-          // Split-vertical lip opening (upper rises, lower falls).
-          const sign = p.baseY < MOUTH_MID_Y ? -1 : 1;
-          const depth = 1 - Math.abs(p.baseY - MOUTH_MID_Y) / MOUTH_HALF;
-          extraY += sign * energy * 0.045 * depth;
-          // Speech vibrato — fast per-particle oscillation with phase variation
-          // so dots near the mouth shimmer like a forming-words motion.
-          if (speaking) {
-            const vibrato = Math.sin(t / 55 + p.phaseA * 3) * energy * 0.014 * depth;
-            const wobble = Math.cos(t / 70 + p.phaseB * 2) * energy * 0.010 * depth;
-            extraY += vibrato;
-            extraX += wobble;
-          }
-        } else if (p.zone === 'jaw' && speechActive) {
-          // Jaw drops with audio (proxy for jaw rotation).
-          const mid = (JAW_TOP_Y + JAW_BOTTOM_Y) / 2;
-          const halfRange = (JAW_BOTTOM_Y - JAW_TOP_Y) / 2;
-          const depth = 1 - Math.abs(p.baseY - mid) / halfRange;
-          extraY += Math.max(0, depth) * energy * 0.022;
-        } else if (p.zone === 'eye-l' || p.zone === 'eye-r') {
-          // Subtle gaze drift — both eyes move together.
-          extraX += gazeX;
-          extraY += gazeY;
-          // Blink: dim eye-zone dots briefly.
-          alphaMul *= 1 - blink * 0.85;
-        }
-
-        // Head bob applies to upper-face particles (forehead, eyes, nose).
-        // Lower face / mouth / jaw have their own motion bands above and
-        // shouldn't get the bob layered on top — that would feel like the
-        // mouth fights the jaw.
-        if (p.baseY < 0.10) {
-          extraY += headBob + syllableNod;
-        }
-
-        // Canvas y+ = down. Silhouette uses the same convention, so no flip.
-        const px = cx + (p.x + extraX) * scale;
-        const py = cy + (p.y + extraY) * scale;
-
-        // Brightness: mass (mask × rim light) × per-particle slow pulse × energy.
-        const pulse = 0.7 + 0.3 * Math.sin(t / 900 + p.phaseA);
-        const brightness = p.mass * pulse * (0.65 + energy * 0.5) * alphaMul;
-
-        // Crisp small dots — solid fill, no per-dot glow gradient. The orb
-        // glow comes from the outer aura layered behind, not from each dot
-        // bleeding into its neighbours. Keeps the face shape readable.
-        const r = Math.max(0.9, scale * 0.0055);
-        ctx.fillStyle = `rgba(${RGB.r}, ${RGB.g}, ${RGB.b}, ${Math.min(1, brightness).toFixed(3)})`;
-        ctx.beginPath();
-        ctx.arc(px, py, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      rafRef.current = requestAnimationFrame(draw);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      raf = requestAnimationFrame(draw);
     };
+    raf = requestAnimationFrame(draw);
 
-    rafRef.current = requestAnimationFrame(draw);
     return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      cancelAnimationFrame(raf);
       ro.disconnect();
+      gl.deleteProgram(prog);
+      gl.deleteShader(vert);
+      gl.deleteShader(frag);
+      gl.deleteBuffer(buf);
+      gl.deleteVertexArray(vao);
     };
-  }, [particles]);
+  }, []);
 
   return (
     <div
