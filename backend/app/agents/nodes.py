@@ -709,6 +709,119 @@ async def _build_conversation_answer(state: AgentState) -> str:
     return _local_conversation_fallback(task)
 
 
+async def _gemini_grounded_research(task: str, *, role_hint: str = "researcher", model: str = "gemini-2.5-flash") -> tuple[str, list[str]]:
+    """Run the task through Gemini with native Google Search grounding.
+
+    Returns (answer_text, citation_urls). When GOOGLE_API_KEY is set this is
+    preferred over the OpenAI web_search path because Gemini does its own
+    search retrieval and returns citations as URL annotations — no extra
+    tool plumbing on our side, and the doc specifically picked Gemini for
+    this role precisely because of grounding.
+
+    Cost is ~$0.30/$2.50 per 1M tokens plus $35/1K queries above the first
+    1,500/day free; for personal volume this stays sub-$5/month.
+    """
+    if not settings.google_api_key:
+        return "", []
+
+    # Current Google Gen AI SDK. The older google-generativeai package is
+    # deprecated and silently rejects Gemini 2.x grounding tool shapes —
+    # the only reliable way to get search-grounded answers from gemini-2.5
+    # Flash today is via google.genai with the typed Tool(GoogleSearch())
+    # parameter.
+    try:
+        from google import genai
+        from google.genai import types as genai_types
+    except Exception:
+        return "", []
+
+    prompt = (
+        f"You are the {role_hint} on a multi-agent team. Use Google Search to find live, "
+        "up-to-date information and answer the EXACT question asked — no more, no less. "
+        "Do NOT deflect with 'check the official website'; actually look it up.\n\n"
+        "Output format (this is being SPOKEN ALOUD by a TTS):\n"
+        "- If the operator asked for 'current' or 'now' or 'today', give ONLY current/today. "
+        "Don't volunteer a forecast, a multi-day schedule, historical context, or adjacent info unless explicitly asked.\n"
+        "- Conversational prose. No markdown, no hashes, no bullet asterisks, no numbered lists "
+        "unless the question itself is clearly a list (e.g. 'list today's games'). For lists, keep under 4 items.\n"
+        "- Write numbers and units the way a person would speak them. "
+        "Examples: '53 degrees Fahrenheit' not '53F'. '21 degrees Celsius' not '21C'. "
+        "'2 p.m. Eastern' not '14:00 ET'. '$199' can stay but spell out 'percent' and 'degrees'.\n"
+        "- No inline URLs in parentheses — they get read aloud character-by-character. "
+        "If you must cite a source, just say the outlet name ('per ESPN') and skip the URL.\n"
+        "- Under 60 words for simple factual questions, under 180 for list answers. "
+        "No preamble, no filler openers ('Sure', 'Absolutely', 'Here is', 'Here are', 'Let me', 'Of course').\n"
+        "- Never invent personal facts about the operator — treat the question as standalone.\n\n"
+        f"Question: {task}"
+    )
+
+    # The grounding tool is a Gemini-side feature: we pass it in the
+    # `tools` config and Gemini decides on its own whether to issue a
+    # search and how to fold the results into the answer. Use the typed
+    # Tool(GoogleSearch()) shape from google.genai — that's the documented
+    # path for Gemini 2.x. The dict-shape fallback used by the deprecated
+    # SDK silently no-ops, which is why earlier attempts answered without
+    # citations.
+    response = None
+    try:
+        client = genai.Client(api_key=settings.google_api_key)
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=model,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+            ),
+        )
+    except Exception:
+        # Fall back to no-grounding so a transient tool-availability issue
+        # doesn't surface as an empty answer to the user.
+        try:
+            client = genai.Client(api_key=settings.google_api_key)
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model=model,
+                contents=prompt,
+            )
+        except Exception:
+            return "", []
+
+    # Extract the answer text. The SDK exposes `.text` on the top-level
+    # response when there's exactly one candidate; fall back to walking
+    # candidates[0].content.parts when needed.
+    text = ""
+    try:
+        text = (response.text or "").strip()
+    except Exception:
+        try:
+            for cand in getattr(response, "candidates", []) or []:
+                content = getattr(cand, "content", None)
+                for part in getattr(content, "parts", []) or []:
+                    chunk = getattr(part, "text", None)
+                    if chunk:
+                        text += chunk
+            text = text.strip()
+        except Exception:
+            text = ""
+
+    # Pull citation URLs from grounding_metadata.grounding_chunks. Shape:
+    # response.candidates[0].grounding_metadata.grounding_chunks[i].web.uri
+    citations: list[str] = []
+    try:
+        for cand in getattr(response, "candidates", []) or []:
+            meta = getattr(cand, "grounding_metadata", None)
+            chunks = getattr(meta, "grounding_chunks", None) or []
+            for chunk in chunks:
+                web = getattr(chunk, "web", None)
+                uri = getattr(web, "uri", None) if web else None
+                if uri and uri not in citations:
+                    citations.append(uri)
+    except Exception:
+        pass
+
+    return text, citations[:8]
+
+
 async def _openai_web_research(task: str, *, role_hint: str = "researcher") -> tuple[str, list[str]]:
     """Run the task through OpenAI's Responses API with the built-in web_search tool.
 
@@ -790,8 +903,31 @@ async def _specialist_live_answer(
     mem_refs = state.get("memory_refs", []) or []
 
     # 1) Live web lookup when the role benefits from fresh data.
-    if use_web_search and settings.openai_api_key:
-        live_answer, live_sources = await _openai_web_research(task, role_hint=agent_id)
+    if use_web_search:
+        live_answer = ""
+        live_sources: list[str] = []
+
+        # Prefer Gemini's native search grounding when the agent's profile
+        # is on Google AND the key is configured. The doc explicitly picked
+        # Gemini for the Researcher because of grounding, so honor that
+        # routing whenever it's available — citations come back as URL
+        # annotations directly from the grounded response.
+        try:
+            from app.services.agent_profile_service import agent_profile_service
+            profile = agent_profile_service.get_profile(agent_id) or {}
+        except Exception:
+            profile = {}
+        prefers_gemini = (str(profile.get("provider") or "").lower() == "google") and bool(settings.google_api_key)
+        if prefers_gemini:
+            model_id = str(profile.get("model") or settings.agent_model_researcher).strip() or "gemini-2.5-flash"
+            live_answer, live_sources = await _gemini_grounded_research(task, role_hint=agent_id, model=model_id)
+
+        # Fall back to OpenAI's Responses API web_search when Gemini either
+        # isn't keyed or returns nothing. Keeps research working out of the
+        # box on installs that haven't yet added a Google key.
+        if not live_answer and settings.openai_api_key:
+            live_answer, live_sources = await _openai_web_research(task, role_hint=agent_id)
+
         if live_answer:
             if live_sources:
                 merged = list(citations)

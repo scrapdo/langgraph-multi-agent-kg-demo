@@ -182,26 +182,42 @@ class Settings(BaseSettings):
     # classify intent before dispatching to a specialist. Sub-200ms TTFT.
     agent_provider_delegator_router: str = "openai"
     agent_model_delegator_router: str = "gpt-4.1-nano"
-    # Researcher prefers Google direct (native search grounding) but the doc
-    # also explicitly endorses "one OpenRouter account for all agents". We
-    # default to the openrouter passthrough so it works on stock installs.
-    agent_provider_researcher: str = "openrouter"
-    agent_model_researcher: str = "google/gemini-2.5-flash"
+    # Researcher uses Gemini direct so we can flip on Google's search-
+    # grounding feature (`tools=[{google_search:{}}]`) — that's the entire
+    # reason the doc picked Gemini for this role. Without grounding, Gemini
+    # answers from training data only and the "real citations, no
+    # hallucinated quotes" promise breaks. OpenRouter passthrough doesn't
+    # surface the grounding flag, so we go direct.
+    # Falls back to whatever provider IS keyed if google_api_key is empty.
+    agent_provider_researcher: str = "google"
+    agent_model_researcher: str = "gemini-2.5-flash"
     agent_provider_writer: str = "openrouter"
-    agent_model_writer: str = "qwen/qwen3-235b-a22b-instruct"
+    # Real OpenRouter slug for the doc's "Qwen3-235B-A22B" pick — verified
+    # 2026-04 against /api/v1/models. The non-VL slug doesn't exist; the VL
+    # build is the actual frontier release and handles text-only writing.
+    agent_model_writer: str = "qwen/qwen3-vl-235b-a22b-instruct"
     agent_provider_critic: str = "anthropic"
     agent_model_critic: str = "claude-haiku-4-5"
     agent_provider_coding: str = "openrouter"
-    agent_model_coding: str = "mistralai/devstral-small-2505"
+    # The doc's "Devstral 2" → real slug is `devstral-2512` (Dec 2025 cut).
+    agent_model_coding: str = "mistralai/devstral-2512"
     # Shopper: same Google passthrough rationale as researcher above.
     agent_provider_shopper: str = "openrouter"
     agent_model_shopper: str = "google/gemini-2.5-flash-lite"
     agent_provider_social: str = "openrouter"
-    agent_model_social: str = "deepseek/deepseek-chat"
+    # The doc's "DeepSeek V3.2" → exact slug confirmed.
+    agent_model_social: str = "deepseek/deepseek-v3.2"
     agent_provider_secretary: str = "openrouter"
-    agent_model_secretary: str = "deepseek/deepseek-chat"
+    # The doc's "DeepSeek V3.1" → exact slug confirmed (chat-v3.1).
+    agent_model_secretary: str = "deepseek/deepseek-chat-v3.1"
     agent_provider_wellness: str = "openrouter"
-    agent_model_wellness: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # Doc says "Llama 3.3 70B (free)" — but the OpenRouter free endpoint is
+    # heavily rate-limited upstream and 429s on quiet weeks. The paid
+    # endpoint is $0.10/$0.32 per 1M tokens — at ~1K wellness queries/month
+    # of ~3K tokens each that's ~$0.30/month. Worth it for reliability;
+    # users can switch back to `:free` via secrets.env when willing to trade
+    # latency-spikes for $0.30.
+    agent_model_wellness: str = "meta-llama/llama-3.3-70b-instruct"
 
     api_bearer_token: str = ""
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"

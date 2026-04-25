@@ -14,6 +14,13 @@ dependencies = [
   "langchain-openai>=0.1.23",
   "langchain-anthropic>=0.3.0",
   "langchain-google-genai>=2.0.0",
+  # google-genai is the current Google Gen AI SDK (the older
+  # google-generativeai is deprecated). We use it for the Researcher's
+  # native Google Search grounding — `tools=[Tool(google_search=
+  # GoogleSearch())]` returns answers with citation URIs in
+  # grounding_metadata. langchain-google-genai handles plain chat but
+  # doesn't expose the grounding tool.
+  "google-genai>=1.0.0",
   "openai>=1.40.0",
   "neo4j>=5.23.0",
   "zep-cloud>=2.13.0",

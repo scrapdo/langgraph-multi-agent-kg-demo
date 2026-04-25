@@ -27,6 +27,10 @@ for pkg in (
     "langchain_openai",
     "langchain_anthropic",
     "langchain_google_genai",
+    # google-genai is the current Google Gen AI SDK (replaces deprecated
+    # google-generativeai). Used for the Researcher's grounded web search.
+    "google.genai",
+    "google.genai.types",
     "langgraph",
     "langgraph.checkpoint.sqlite",
     "langgraph.checkpoint.sqlite.aio",
