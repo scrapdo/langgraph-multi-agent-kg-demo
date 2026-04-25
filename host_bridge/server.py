@@ -512,6 +512,51 @@ def _run_osascript_jxa(script: str, *args: str, timeout: float = 15.0) -> str:
         raise HTTPException(status_code=500, detail=f"Calendar script failed: {stderr}") from exc
     return (result.stdout or "").strip()
 
+# Same shape as list-today, but the end-of-window is `daysAhead` from now
+# instead of hard-coded 1. Skip-list is identical so imported feeds (Holidays,
+# Birthdays, Auctions, Siri Suggestions) don't blow up the iteration.
+_CALENDAR_LIST_RANGE_SCRIPT = r'''
+on run argv
+  set daysAhead to (item 1 of argv) as integer
+  tell application "Calendar"
+    set theStart to current date
+    set hours of theStart to 0
+    set minutes of theStart to 0
+    set seconds of theStart to 0
+    set theEnd to theStart + daysAhead * days
+    set output to ""
+    repeat with cal in calendars
+      set calName to name of cal
+      set isFeed to false
+      if calName contains "Holiday" then set isFeed to true
+      if calName contains "Holidays" then set isFeed to true
+      if calName contains "Birthday" then set isFeed to true
+      if calName contains "Birthdays" then set isFeed to true
+      if calName starts with "Siri" then set isFeed to true
+      if calName contains "Scheduled Reminders" then set isFeed to true
+      if calName contains "Auction" then set isFeed to true
+      if not isFeed then
+        try
+          set evs to (every event of cal whose start date is greater than or equal to theStart and start date is less than theEnd)
+          repeat with ev in evs
+            set output to output & (summary of ev) & "||" & ((start date of ev) as string) & "||" & ((end date of ev) as string) & "||" & calName & linefeed
+          end repeat
+        end try
+      end if
+    end repeat
+    return output
+  end tell
+end run
+'''
+
+
+class CalendarListRangePayload(BaseModel):
+    # 1 == today only (same as list-today). Capped at 14 — beyond that
+    # AppleScript's `whose` clause balloons in latency and the secretary
+    # rarely needs more than two-week visibility.
+    days_ahead: int = 7
+
+
 _CALENDAR_CREATE_SCRIPT = (
     'on run argv\n'
     '  set theTitle to item 1 of argv\n'
@@ -565,6 +610,37 @@ def calendar_list_today(authorization: str | None = Header(default=None)):
             }
         )
     return {"ok": True, "app": "calendar", "events": events, "count": len(events)}
+
+
+@app.post("/calendar/list-range")
+def calendar_list_range(payload: CalendarListRangePayload, authorization: str | None = Header(default=None)):
+    _require_auth(authorization)
+    _ensure_macos()
+    days = max(1, min(14, int(payload.days_ahead or 7)))
+    # Wider window = more events to enumerate. 14 days with ~10 calendars
+    # observed at ~25-30s on this Mac with imported feeds skipped, so allow
+    # 60s ceiling (vs 35s for list-today).
+    raw = _run_osascript(_CALENDAR_LIST_RANGE_SCRIPT, str(days), timeout=60.0)
+    events: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        parts = line.split("||")
+        if len(parts) < 3:
+            continue
+        events.append(
+            {
+                "title": parts[0],
+                "start": parts[1],
+                "end": parts[2],
+                "calendar": parts[3] if len(parts) > 3 else "",
+            }
+        )
+    return {
+        "ok": True,
+        "app": "calendar",
+        "events": events,
+        "count": len(events),
+        "days_ahead": days,
+    }
 
 
 # Accept any ISO-8601-ish timestamp. LLMs emit a variety of formats:

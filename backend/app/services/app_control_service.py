@@ -12,6 +12,7 @@ registering them in ``_ACTIONS``.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable
 
 import httpx
@@ -21,6 +22,20 @@ from app.core.config import settings
 
 class AppControlError(RuntimeError):
     """Raised when the host bridge is unavailable or rejects a request."""
+
+
+# Small in-process cache for read-only host-bridge calls that are slow to
+# regenerate (Calendar's AppleScript bridge takes ~20s for today, ~30s for a
+# week's range). Keyed by (app, action, hash-of-args). 30 second TTL — short
+# enough that stale data never matters in practice (operators rarely act on
+# events that just appeared in the last half-minute), long enough that
+# follow-up questions in the same conversation are instant.
+_CACHE_TTL_SECONDS = 30.0
+_CACHEABLE: set[tuple[str, str]] = {
+    ("calendar", "list_today"),
+    ("calendar", "list_range"),
+}
+_response_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
 
 
 # A single dispatcher entry describes how an (app, action) pair maps onto a
@@ -79,6 +94,16 @@ def _mail_compose(args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
 
 def _calendar_list_today(_args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     return "/calendar/list-today", None
+
+
+def _calendar_list_range(args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    raw = args.get("days_ahead") or args.get("days") or 7
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(14, days))
+    return "/calendar/list-range", {"days_ahead": days}
 
 
 def _calendar_create(args: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
@@ -143,6 +168,7 @@ _ACTIONS: dict[tuple[str, str], _Dispatcher] = {
     ("messages", "send"): _messages_send,
     ("mail", "compose"): _mail_compose,
     ("calendar", "list_today"): _calendar_list_today,
+    ("calendar", "list_range"): _calendar_list_range,
     ("calendar", "create"): _calendar_create,
 }
 
@@ -183,9 +209,24 @@ class AppControlService:
         if not dispatcher:
             raise AppControlError(f"Unknown action: {app_clean}.{action_clean}")
         path, body = dispatcher(args or {})
+
+        # Cache slow read-only calls. Body keying is deterministic — sorted
+        # repr is enough since we only ship JSON-serializable scalar args.
+        cache_key: tuple[str, str, str] | None = None
+        if key in _CACHEABLE:
+            cache_key = (app_clean, action_clean, repr(sorted((body or {}).items())))
+            cached = _response_cache.get(cache_key)
+            if cached is not None:
+                ts, payload = cached
+                if time.monotonic() - ts < _CACHE_TTL_SECONDS:
+                    return payload
+
         url = f"{self._base_url()}{path}"
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            # 90s ceiling — calendar list-range can take ~30s for a 14-day
+            # window on Macs with many calendars. Short timeouts here only
+            # cause us to abandon successful queries mid-flight.
+            async with httpx.AsyncClient(timeout=90) as client:
                 response = await client.post(url, headers=self._headers(), json=body or {})
         except httpx.HTTPError as exc:
             raise AppControlError(f"Host bridge unreachable: {exc}") from exc
@@ -194,9 +235,12 @@ class AppControlService:
                 f"Host bridge {response.status_code}: {response.text[:300]}"
             )
         try:
-            return response.json()
+            payload = response.json()
         except Exception:
-            return {"ok": True, "raw": response.text[:1000]}
+            payload = {"ok": True, "raw": response.text[:1000]}
+        if cache_key is not None:
+            _response_cache[cache_key] = (time.monotonic(), payload)
+        return payload
 
 
 app_control_service = AppControlService()

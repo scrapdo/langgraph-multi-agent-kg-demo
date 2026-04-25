@@ -156,6 +156,53 @@ class Settings(BaseSettings):
     browser_verify_ssl: bool = False
     playwright_headless: bool = True
 
+    # ------------------------------------------------------------------
+    # Per-agent model assignments. Source: the AGENT ECOSYSTEM AI Model
+    # Recommendations doc (April 2026) which specifies a primary model per
+    # role optimized for cost, latency, and capability. Each role has BOTH
+    # a provider and a model slug — we route through model_router_service
+    # which owns API-key + base-URL selection. Override any of these in
+    # secrets.env if the recommended slug is unavailable on your account.
+    #
+    # The doc's reasoning at a glance:
+    #   coordinator  · gpt-4.1-mini    · best IFEval (instruction following) at sub-frontier price
+    #   delegator    · gpt-4.1-nano    · fastest GPT-4.1, pure router (no reasoning needed)
+    #   researcher   · gemini-2.5-flash · native Google search grounding, automatic citations
+    #   writer       · qwen3-235b      · #1 open-source creative alignment 2026
+    #   critic       · claude-haiku-4-5 · best quality-review tone discipline
+    #   coding       · devstral 2      · purpose-built agentic coding, beats GPT-5 on SWE-bench
+    #   shopper      · gemini flash-lite · cheapest with 1M ctx, fastest TTFT for price lookups
+    #   social       · deepseek v3     · strong reasoning + writing at 1/50th frontier cost
+    #   secretary    · deepseek v3     · #1 open-source tool calling for calendar/email actions
+    #   wellness     · llama-3.3-70b:free · free tier handles wellness coaching well
+    # ------------------------------------------------------------------
+    agent_provider_coordinator: str = "openai"
+    agent_model_coordinator: str = "gpt-4.1-mini"
+    # The Delegator is the fast inner router — used by the coordinator to
+    # classify intent before dispatching to a specialist. Sub-200ms TTFT.
+    agent_provider_delegator_router: str = "openai"
+    agent_model_delegator_router: str = "gpt-4.1-nano"
+    # Researcher prefers Google direct (native search grounding) but the doc
+    # also explicitly endorses "one OpenRouter account for all agents". We
+    # default to the openrouter passthrough so it works on stock installs.
+    agent_provider_researcher: str = "openrouter"
+    agent_model_researcher: str = "google/gemini-2.5-flash"
+    agent_provider_writer: str = "openrouter"
+    agent_model_writer: str = "qwen/qwen3-235b-a22b-instruct"
+    agent_provider_critic: str = "anthropic"
+    agent_model_critic: str = "claude-haiku-4-5"
+    agent_provider_coding: str = "openrouter"
+    agent_model_coding: str = "mistralai/devstral-small-2505"
+    # Shopper: same Google passthrough rationale as researcher above.
+    agent_provider_shopper: str = "openrouter"
+    agent_model_shopper: str = "google/gemini-2.5-flash-lite"
+    agent_provider_social: str = "openrouter"
+    agent_model_social: str = "deepseek/deepseek-chat"
+    agent_provider_secretary: str = "openrouter"
+    agent_model_secretary: str = "deepseek/deepseek-chat"
+    agent_provider_wellness: str = "openrouter"
+    agent_model_wellness: str = "meta-llama/llama-3.3-70b-instruct:free"
+
     api_bearer_token: str = ""
     allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 

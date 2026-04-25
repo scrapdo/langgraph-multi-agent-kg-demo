@@ -151,6 +151,7 @@ export function VoiceShell() {
         messages_send: ['messages', 'send'],
         mail_compose: ['mail', 'compose'],
         calendar_list_today: ['calendar', 'list_today'],
+        calendar_list_range: ['calendar', 'list_range'],
         calendar_create: ['calendar', 'create'],
       };
       if (call.name in APP_TOOL_MAP) {

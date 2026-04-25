@@ -155,10 +155,7 @@ async def _call_phone_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
 
     Maps the secretary's function-call tool names onto the existing
     app_control_service which already talks to the macOS host bridge and
-    handles AppleScript safety. calendar_list_range is synthesized from
-    multiple calendar_list_today calls — the bridge only ships list_today
-    and create today, and expanding that for phone isn't worth shipping
-    AppleScript-side yet.
+    handles AppleScript safety.
     """
     from app.services.app_control_service import app_control_service
 
@@ -168,19 +165,16 @@ async def _call_phone_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
             events = (result or {}).get("events") or []
             return {"events": events, "count": len(events)}
         if name == "calendar_list_range":
-            days = int(args.get("days_ahead") or 1)
+            days = int(args.get("days_ahead") or 7)
             days = max(1, min(14, days))
-            # AppleScript list_today is today-only. For a range, we'd need a
-            # new bridge endpoint. Until then, return today's events with a
-            # note so the secretary can say "I can only see today right now
-            # — want me to take the details and have Matt check later?"
-            today = await app_control_service.execute("calendar", "list_today", {})
-            events = (today or {}).get("events") or []
+            result = await app_control_service.execute(
+                "calendar", "list_range", {"days_ahead": days}
+            )
+            events = (result or {}).get("events") or []
             return {
                 "events": events,
                 "count": len(events),
-                "range_days": days,
-                "note": "Range queries beyond today are not yet wired — only today's events returned.",
+                "days_ahead": (result or {}).get("days_ahead", days),
             }
         if name == "calendar_create":
             result = await app_control_service.execute(

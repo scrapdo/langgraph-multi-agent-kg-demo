@@ -32,6 +32,8 @@ const BG = 'rgb(0, 0, 0)';
 
 const PARTICLE_COUNT = 780;
 
+type ParticleZone = 'face' | 'eye-l' | 'eye-r' | 'mouth' | 'jaw';
+
 interface Particle {
   x: number;          // current position, normalized -1..1
   y: number;
@@ -43,6 +45,8 @@ interface Particle {
   /** Per-particle drift frequency and phase for the smooth flow field. */
   fxA: number; fyA: number; fxB: number; fyB: number;
   phaseA: number; phaseB: number;
+  /** Anatomical zone — drives targeted motion (mouth speech, eye blinks). */
+  zone: ParticleZone;
 }
 
 // --- Human silhouette mask -------------------------------------------------
@@ -70,6 +74,31 @@ function silhouetteMask(x: number, y: number): number {
   if (r > 1) return 0;
   // Soft feather only at the very edge so dots fade into the void.
   return 1 - smoothstep(0.85, 1.0, r);
+}
+
+// Anatomical zone classifier. Eyes / mouth / jaw / face. Drives targeted
+// motion in the render loop — eye blinks, mouth speech vibrato, etc. Coords
+// are the same -1..1 mask space used everywhere else in this file.
+const EYE_Y = -0.12;
+const EYE_RX = 0.10;
+const EYE_RY = 0.07;
+const EYE_LX = -0.18;
+const EYE_RX_X = 0.18;
+const MOUTH_MID_Y = 0.22;
+const MOUTH_HALF = 0.07;
+const JAW_TOP_Y = 0.32;
+const JAW_BOTTOM_Y = 0.55;
+
+function zoneFor(x: number, y: number): ParticleZone {
+  const ldx = (x - EYE_LX) / EYE_RX;
+  const ldy = (y - EYE_Y) / EYE_RY;
+  if (ldx * ldx + ldy * ldy < 1) return 'eye-l';
+  const rdx = (x - EYE_RX_X) / EYE_RX;
+  const rdy = (y - EYE_Y) / EYE_RY;
+  if (rdx * rdx + rdy * rdy < 1) return 'eye-r';
+  if (Math.abs(y - MOUTH_MID_Y) < MOUTH_HALF) return 'mouth';
+  if (y > JAW_TOP_Y && y < JAW_BOTTOM_Y) return 'jaw';
+  return 'face';
 }
 
 // --- Per-figure rim lighting so the head reads as 3-D, not a flat oval ----
@@ -122,6 +151,7 @@ function generateParticles(): Particle[] {
       fyB: 0.00090 + rand() * 0.00070,
       phaseA: rand() * Math.PI * 2,
       phaseB: rand() * Math.PI * 2,
+      zone: zoneFor(x, y),
     });
   }
   return out;
@@ -209,19 +239,26 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
       // Drift amplitude grows with audio — the figure "pulses" while speaking.
       const driftScale = 0.006 + energy * 0.025;
 
-      // Anatomical motion bands. Face is now centered at (0, 0). Screen
-      // convention: y < 0 = upper face, y > 0 = lower face/jaw.
-      const mouthMidY = 0.22;         // mouth horizontal centerline (lower face)
-      const mouthBandHalf = 0.07;     // upper-lip / lower-lip split
-      const jawTopY = 0.32;
-      const jawBottomY = 0.55;
-
       // Whole-head bob — a slow, low-amplitude wave that intensifies with
       // speech. Gives the figure a hint of natural sway when talking.
       const headBob = energy * 0.012 * Math.sin(t / 220);
       // Quick syllable-timed micro-nod that fires on speech amplitude — adds
       // cadence to the speaking motion so it doesn't feel like a constant pulse.
       const syllableNod = currentState === 'speaking' ? energy * 0.018 * Math.sin(t / 95) : 0;
+
+      // --- Eye expression: blinks + slow gaze drift. Both run all the time
+      // (idle / listening / thinking / speaking) so the figure feels alive
+      // even when silent. Blink is a brief alpha dip on eye-zone dots; gaze
+      // is a tiny xy translation across both eyes together.
+      const blinkCycle = (t % 5200) / 5200;            // every 5.2s
+      const blink = blinkCycle < 0.04
+        ? 1 - Math.abs(blinkCycle - 0.02) / 0.02       // 0..1..0 over ~210ms
+        : 0;
+      const gazeX = Math.sin(t / 3700) * 0.006 + Math.sin(t / 5300) * 0.003;
+      const gazeY = Math.sin(t / 4200) * 0.003;
+
+      const speaking = currentState === 'speaking';
+      const speechActive = speaking || currentState === 'thinking';
 
       ctx.globalCompositeOperation = 'lighter';
       for (const p of particles) {
@@ -231,24 +268,38 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
         p.x = p.baseX + dx;
         p.y = p.baseY + dy;
 
-        // --- Anatomical speech motion ---
-        // Mouth: split-vertical opening. Particles ABOVE mouth midline rise
-        // (upper lip), particles BELOW fall (lower lip + jaw). Amplitude
-        // scales the gap, energy still drives it smoothly.
-        // Jaw: drops with speech beyond the mouth band (proxy for jaw rotation).
-        // Head: subtle bob + syllable nod, applied uniformly to head particles.
+        // --- Zone-specific motion ---
+        let extraX = 0;
         let extraY = 0;
-        if (currentState === 'speaking' || currentState === 'thinking') {
-          if (Math.abs(p.baseY - mouthMidY) < mouthBandHalf) {
-            const sign = p.baseY < mouthMidY ? -1 : 1; // upper goes up, lower goes down
-            const depth = 1 - Math.abs(p.baseY - mouthMidY) / mouthBandHalf;
-            extraY += sign * energy * 0.045 * depth;
-          } else if (p.baseY > jawTopY && p.baseY < jawBottomY) {
-            // Jaw band drops down with audio.
-            const depth = 1 - Math.abs(p.baseY - (jawTopY + jawBottomY) / 2) / ((jawBottomY - jawTopY) / 2);
-            extraY += Math.max(0, depth) * energy * 0.022;
+        let alphaMul = 1;
+
+        if (p.zone === 'mouth' && speechActive) {
+          // Split-vertical lip opening (upper rises, lower falls).
+          const sign = p.baseY < MOUTH_MID_Y ? -1 : 1;
+          const depth = 1 - Math.abs(p.baseY - MOUTH_MID_Y) / MOUTH_HALF;
+          extraY += sign * energy * 0.045 * depth;
+          // Speech vibrato — fast per-particle oscillation with phase variation
+          // so dots near the mouth shimmer like a forming-words motion.
+          if (speaking) {
+            const vibrato = Math.sin(t / 55 + p.phaseA * 3) * energy * 0.014 * depth;
+            const wobble = Math.cos(t / 70 + p.phaseB * 2) * energy * 0.010 * depth;
+            extraY += vibrato;
+            extraX += wobble;
           }
+        } else if (p.zone === 'jaw' && speechActive) {
+          // Jaw drops with audio (proxy for jaw rotation).
+          const mid = (JAW_TOP_Y + JAW_BOTTOM_Y) / 2;
+          const halfRange = (JAW_BOTTOM_Y - JAW_TOP_Y) / 2;
+          const depth = 1 - Math.abs(p.baseY - mid) / halfRange;
+          extraY += Math.max(0, depth) * energy * 0.022;
+        } else if (p.zone === 'eye-l' || p.zone === 'eye-r') {
+          // Subtle gaze drift — both eyes move together.
+          extraX += gazeX;
+          extraY += gazeY;
+          // Blink: dim eye-zone dots briefly.
+          alphaMul *= 1 - blink * 0.85;
         }
+
         // Head bob applies to upper-face particles (forehead, eyes, nose).
         // Lower face / mouth / jaw have their own motion bands above and
         // shouldn't get the bob layered on top — that would feel like the
@@ -258,12 +309,12 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
         }
 
         // Canvas y+ = down. Silhouette uses the same convention, so no flip.
-        const px = cx + p.x * scale;
+        const px = cx + (p.x + extraX) * scale;
         const py = cy + (p.y + extraY) * scale;
 
         // Brightness: mass (mask × rim light) × per-particle slow pulse × energy.
         const pulse = 0.7 + 0.3 * Math.sin(t / 900 + p.phaseA);
-        const brightness = p.mass * pulse * (0.65 + energy * 0.5);
+        const brightness = p.mass * pulse * (0.65 + energy * 0.5) * alphaMul;
 
         // Crisp small dots — solid fill, no per-dot glow gradient. The orb
         // glow comes from the outer aura layered behind, not from each dot

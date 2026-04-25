@@ -97,12 +97,14 @@ CONTROL LOCAL APPS using the dedicated tools below. Each is a distinct function 
 - messages_send({to, body}) — sends iMessage. CONFIRMATION REQUIRED.
 - mail_compose({to, subject, body, send?}) — opens a draft by default. Pass send=true only when the operator explicitly says "send it now". CONFIRMATION REQUIRED when send=true.
 - calendar_list_today — lists today's events.
+- calendar_list_range({days_ahead}) — lists events over the next N days (1-14). Use for "next Tuesday", "this week", "do I have anything Friday".
 - calendar_create({title, start_iso, end_iso, notes?, calendar?}) — creates a calendar event. CONFIRMATION REQUIRED.
 
 Rules:
 - "play some focus music" → spotify_play_query(query="focus"). "pause" → spotify_pause. "skip" → spotify_next.
 - When the operator asks ANYTHING about today's schedule, calendar, agenda, meetings, or what they have going on — "what's on my calendar", "what's today's schedule", "do I have anything later", "what's my day look like", "any meetings this afternoon" — call `calendar_list_today` SILENTLY (do not say "let me check"), then read back the events in natural speech. If the list is empty, say so. Never guess from memory.
-- When the operator asks to ADD a calendar event, go STRAIGHT to calendar_create after the confirmation gate. Do NOT call calendar_list_today as a "let me check first" step before creating.
+- When the operator asks about a FUTURE day or window — "next Tuesday", "this week", "what's Friday look like", "do I have anything tomorrow", "am I free next Wednesday afternoon" — call `calendar_list_range` SILENTLY with enough `days_ahead` to cover the asked day. Pick the smallest window that covers the question (3 for "next Tuesday" if today is Sunday, 7 for "this week", 14 for "next two weeks"). Then filter the returned events down to the asked day in your spoken summary.
+- When the operator asks to ADD a calendar event, go STRAIGHT to calendar_create after the confirmation gate. Do NOT call calendar_list_today or calendar_list_range as a "let me check first" step before creating.
 - start_iso / end_iso must be full ISO format: "YYYY-MM-DDTHH:MM:SS" (no Z, no timezone offset, local time). If the operator says "tomorrow at 8:15pm", compute the actual date/time yourself.
 - Never invent phone numbers or emails — if you don't have the contact, ask.
 
@@ -177,7 +179,7 @@ APP_CONTROL_ACTIONS_BY_APP = {
     "spotify": ["play", "pause", "next", "previous", "now_playing", "play_query"],
     "messages": ["send"],
     "mail": ["compose"],
-    "calendar": ["list_today", "create"],
+    "calendar": ["list_today", "list_range", "create"],
 }
 APP_CONTROL_ACTIONS = sorted(
     {action for actions in APP_CONTROL_ACTIONS_BY_APP.values() for action in actions}
@@ -475,6 +477,28 @@ def build_delegator_tools() -> list[dict[str, Any]]:
             "name": "calendar_list_today",
             "description": "Return today's events from the operator's Mac Calendar.",
             "parameters": {"type": "object", "properties": {}},
+        },
+        {
+            "type": "function",
+            "name": "calendar_list_range",
+            "description": (
+                "Return events from the operator's Mac Calendar over the next N days. "
+                "Use this for any future-day question — 'next Tuesday', 'this week', "
+                "'do I have anything Friday'. Pick days_ahead to cover the asked day "
+                "(e.g. 3 for 'next Tuesday' if today is Sunday, 7 for 'this week')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days_ahead": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 14,
+                        "description": "Number of days forward from today to include (1-14).",
+                    },
+                },
+                "required": ["days_ahead"],
+            },
         },
         {
             "type": "function",

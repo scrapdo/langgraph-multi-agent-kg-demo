@@ -127,39 +127,63 @@ def available_catalog() -> dict[str, Any]:
                 "models": [settings.transformers_local_model],
             },
         ],
+        # Per-agent recommendations sourced from the April 2026 AI Model
+        # Recommendations doc (see config.py for the rationale). Each entry
+        # uses the per-agent (provider, model) settings from config.py with
+        # graceful fallback to whatever provider IS configured if the
+        # recommended one isn't keyed up on this install.
         "recommended_by_function": {
-            "coordinator": {"provider": "openai", "model": settings.openai_model},
-            "researcher": {
-                "provider": "openrouter" if _provider_ready("openrouter") else "perplexity",
-                "model": "qwen/qwen-2.5-72b-instruct" if _provider_ready("openrouter") else settings.perplexity_model,
-            },
-            "critic": {"provider": "anthropic", "model": settings.anthropic_model},
-            "writer": {
-                "provider": "openrouter" if _provider_ready("openrouter") else "google",
-                "model": "meta-llama/llama-3.3-70b-instruct" if _provider_ready("openrouter") else settings.google_model,
-            },
-            "coding": {
-                "provider": "openrouter" if _provider_ready("openrouter") else "anthropic",
-                "model": "qwen/qwen-2.5-coder-32b-instruct" if _provider_ready("openrouter") else settings.anthropic_model,
-            },
-            "shopper": {
-                "provider": "perplexity" if _provider_ready("perplexity") else "openrouter",
-                "model": settings.perplexity_model if _provider_ready("perplexity") else "qwen/qwen-2.5-72b-instruct",
-            },
-            "social": {
-                "provider": "openrouter" if _provider_ready("openrouter") else "openai",
-                "model": "meta-llama/llama-3.3-70b-instruct" if _provider_ready("openrouter") else settings.openai_model,
-            },
-            "secretary": {
-                "provider": "openai" if _provider_ready("openai") else "anthropic",
-                "model": settings.openai_model if _provider_ready("openai") else settings.anthropic_model,
-            },
-            "wellness": {
-                "provider": "anthropic" if _provider_ready("anthropic") else "openai",
-                "model": settings.anthropic_model if _provider_ready("anthropic") else settings.openai_model,
-            },
+            "coordinator": _agent_with_fallback(
+                settings.agent_provider_coordinator, settings.agent_model_coordinator
+            ),
+            "delegator_router": _agent_with_fallback(
+                settings.agent_provider_delegator_router, settings.agent_model_delegator_router
+            ),
+            "researcher": _agent_with_fallback(
+                settings.agent_provider_researcher, settings.agent_model_researcher
+            ),
+            "writer": _agent_with_fallback(
+                settings.agent_provider_writer, settings.agent_model_writer
+            ),
+            "critic": _agent_with_fallback(
+                settings.agent_provider_critic, settings.agent_model_critic
+            ),
+            "coding": _agent_with_fallback(
+                settings.agent_provider_coding, settings.agent_model_coding
+            ),
+            "shopper": _agent_with_fallback(
+                settings.agent_provider_shopper, settings.agent_model_shopper
+            ),
+            "social": _agent_with_fallback(
+                settings.agent_provider_social, settings.agent_model_social
+            ),
+            "secretary": _agent_with_fallback(
+                settings.agent_provider_secretary, settings.agent_model_secretary
+            ),
+            "wellness": _agent_with_fallback(
+                settings.agent_provider_wellness, settings.agent_model_wellness
+            ),
         },
     }
+
+
+def _agent_with_fallback(provider: str, model: str) -> dict[str, str]:
+    """Return the per-agent (provider, model) if the provider is keyed up.
+
+    If the recommended provider has no API key on this install, fall back to
+    the first provider that does — keeps the UI catalog showing something
+    real rather than a broken default. The model slug is preserved when the
+    provider matches; on fallback we use the fallback provider's default.
+    """
+    provider = (provider or "").strip().lower()
+    if provider and _provider_ready(provider):
+        return {"provider": provider, "model": (model or "").strip() or _default_model_for_provider(provider)}
+    for fallback in ("openai", "openrouter", "google", "anthropic", "perplexity", "groq"):
+        if _provider_ready(fallback):
+            return {"provider": fallback, "model": _default_model_for_provider(fallback)}
+    # Last-resort: return the requested values verbatim (UI shows them as
+    # configured even if not currently usable).
+    return {"provider": provider or "openai", "model": (model or settings.openai_model)}
 
 
 def _fallback_model() -> ModelConfig:
