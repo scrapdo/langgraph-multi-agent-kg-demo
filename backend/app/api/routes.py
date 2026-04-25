@@ -699,8 +699,31 @@ async def _validate_twilio_request(request: Request, form: dict[str, str]) -> No
     if not settings.twilio_auth_token:
         return  # Not configured yet — skip validation.
     signature = request.headers.get("X-Twilio-Signature", "")
-    # Twilio signs the full URL it POSTed to (including query string).
-    full_url = str(request.url)
+    # Twilio signs the full URL it POSTed to (including query string). When
+    # we sit behind ngrok / Cloudflare Tunnel / any TLS-terminating proxy,
+    # uvicorn sees plain HTTP — but Twilio computed the signature against
+    # the public HTTPS URL the caller hit. Reconstructing with `request.url`
+    # alone gives us http://... which fails the HMAC every time. Honor the
+    # forwarded proto/host (or the explicit TELEPHONY_PUBLIC_BASE) so the
+    # URL we hash matches the URL Twilio hashed.
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    forwarded_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").strip()
+    public_base = (settings.telephony_public_base or "").strip().rstrip("/")
+    if public_base:
+        # Most reliable: trust the configured public base. Twilio hits a
+        # known URL we ourselves told it about, so this is the canonical
+        # form regardless of proxy chain quirks.
+        path_with_query = request.url.path
+        if request.url.query:
+            path_with_query += "?" + request.url.query
+        full_url = f"{public_base}{path_with_query}"
+    elif forwarded_proto and forwarded_host:
+        path_with_query = request.url.path
+        if request.url.query:
+            path_with_query += "?" + request.url.query
+        full_url = f"{forwarded_proto}://{forwarded_host}{path_with_query}"
+    else:
+        full_url = str(request.url)
     if not validate_twilio_signature(settings.twilio_auth_token, full_url, form, signature):
         logging.getLogger("app.telephony").warning(
             "twilio_signature_invalid", extra={"url": full_url}

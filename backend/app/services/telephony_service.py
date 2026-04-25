@@ -39,17 +39,20 @@ logger = logging.getLogger("app.telephony")
 
 
 SECRETARY_PHONE_INSTRUCTIONS = """\
-You are the operator's executive secretary, handling an active phone call. You are speaking over a phone line — keep responses tight, natural, and conversational. No filler openers.
+You are Emma, Matt's executive secretary, handling an active phone call. You are speaking over a phone line — keep responses tight, natural, and conversational. No filler openers.
+
+YOUR NAME IS EMMA. If a caller asks "what's your name?", "who am I speaking with?", "do you have a name?", or anything similar — answer with your actual name: "I'm Emma" or "Emma — Matt's assistant". Never dodge the question with just "I'm Matt's assistant" — that sounds evasive and callers notice. Once you've given your name, you don't need to repeat it on every turn.
 
 If this is an INBOUND call (someone called the operator's number):
-- Greet warmly: "Hi, you've reached Matt's assistant — how can I help?"
+- Greet warmly: "Hi, this is Emma — Matt's assistant. How can I help?"
 - Identify who's calling and why.
-- If the caller wants to reach Matt directly, take a message: name, number, reason, best time to reach back.
+- ANY time you're going to add an event to Matt's calendar on a caller's behalf, you MUST collect the caller's name and a callback number first (so Matt can reach them if anything changes). Stitch them into the event notes when you call calendar_create. Phrasing: "Just so I can put your name on the event and pass it to Matt, can I get your name and the best number to reach you back?"
+- If the caller wants to reach Matt directly without booking, take a message: name, number, reason, best time to reach back.
 - Do NOT impersonate Matt. You are his assistant, not him.
 - For unsolicited sales calls, politely decline and hang up.
 
 If this is an OUTBOUND call (you're calling someone on the operator's behalf):
-- Start: "Hi, this is Matt's assistant calling on his behalf about [context]."
+- Start: "Hi, this is Emma — Matt's assistant — calling on his behalf about [context]."
 - Deliver the operator's intent clearly, confirm the other party, and handle follow-ups.
 - If the callee asks questions you can't answer, say "I'll check with Matt and have him follow up."
 
@@ -65,8 +68,10 @@ Tools available during this call:
 - `calendar_create({title, start_iso, end_iso, notes?})` — ADD an event to Matt's calendar. Requires verbal confirmation (see below).
 
 Using the tools:
-- Call them SILENTLY. Don't say "let me check" or "one moment" — just call the tool; the caller hears natural pauses regardless.
+- BEFORE calling calendar_list_today or calendar_list_range, give the caller a SHORT verbal heads-up like "Let me pull up his calendar — one sec" or "Hold on while I check Monday for you." These tools talk to a real macOS Calendar and take 20–30 seconds. Without the heads-up the line goes dead-silent and callers think it dropped — the prior version of this prompt told you to be silent, that was wrong.
+- For calendar_create, you have already read the event back and gotten a yes — silence after "okay, adding it now" is fine because the caller knows you're acting.
 - Report findings in natural speech. "Matt has a 2pm today and he's open after 4" — not "matt_calendar returned three events at..."
+- If the caller talks while you're waiting on a tool, that's fine — finish the lookup, then acknowledge what they said and answer.
 
 CONFIRMATION GATE for calendar_create (MANDATORY):
 Before actually calling calendar_create, you MUST:
@@ -84,6 +89,19 @@ You cannot send texts or emails during this call. For those, take a message and 
 
 
 OPENAI_REALTIME_WS = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+
+
+def _today_human_string() -> str:
+    """Today's date in operator-local timezone, formatted human-readably for
+    the secretary prompt. Used by both the OpenAI Realtime and ElevenLabs
+    Conv AI bridges so neither one hallucinates dates on phone calls."""
+    from datetime import datetime
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo(settings.app_timezone or "America/New_York"))
+    except Exception:
+        now = datetime.now()
+    return now.strftime("%A, %B %-d, %Y")
 
 
 def _phone_tools() -> list[dict[str, Any]]:
@@ -252,9 +270,9 @@ class _CallBridge:
         # they'd wait for us and we'd wait for them (server VAD), producing a
         # dead line. One short greeting breaks the standoff.
         greeting = (
-            "Greet the caller warmly as Matt's assistant and ask how you can help. Keep it to one sentence."
+            "Greet the caller as Emma — Matt's assistant — and ask how you can help. Keep it to one sentence and include your name."
             if self.direction == "inbound"
-            else "Greet the callee as Matt's assistant calling on his behalf and briefly state the reason. Keep it to one sentence."
+            else "Greet the callee as Emma, Matt's assistant, calling on his behalf, and briefly state the reason. Keep it to one sentence and include your name."
         )
         await self.openai_ws.send(
             json.dumps(
@@ -284,6 +302,20 @@ class _CallBridge:
         if self.context:
             base += f"\n\n[Current call context: {self.context}]"
         base += f"\n\n[Call direction: {self.direction}]"
+        # Date grounding — see _ElevenLabsBridge._instructions for context.
+        # Realtime models hallucinate dates without an explicit anchor.
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo(settings.app_timezone or "America/New_York"))
+        except Exception:
+            now = datetime.now()
+        base += (
+            f"\n\n[Today's date: {now.strftime('%A, %B %-d, %Y')}. Current time: {now.strftime('%-I:%M %p %Z')}.]"
+            "\n[When the caller says a relative day like 'Monday' or 'next Tuesday', "
+            "compute the actual calendar date from today's date above. Read it back "
+            "with the date number ('Monday, April 27th') so the caller can catch any mismatch.]"
+        )
         return base
 
     async def _twilio_to_openai(self) -> None:
@@ -358,7 +390,10 @@ class _CallBridge:
                         tool_args = {}
                     logger.info(
                         "telephony_tool_call",
-                        extra={"name": tool_name, "args_keys": sorted(tool_args.keys())},
+                        # `name` is reserved on LogRecord (it's the logger
+                        # name); the formatter raises if we try to overwrite
+                        # it via extra=. Use `tool` instead.
+                        extra={"tool": tool_name, "args_keys": sorted(tool_args.keys())},
                     )
                     output = await _call_phone_tool(tool_name, tool_args)
                     # function_call_output must be sent first, then response.create
@@ -376,7 +411,7 @@ class _CallBridge:
                         )
                     )
                     await self.openai_ws.send(json.dumps({"type": "response.create"}))
-                    logger.info("telephony_tool_returned", extra={"name": tool_name})
+                    logger.info("telephony_tool_returned", extra={"tool": tool_name})
                 elif mtype in ("session.updated", "response.created", "response.done", "response.output_item.done"):
                     # Surfaced so we can see the model actually processing. Volume is fine;
                     # a typical call only fires 10-30 of these total.
@@ -407,6 +442,314 @@ class _CallBridge:
                     await self.openai_ws.close()
                 except Exception:
                     pass
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs Conversational AI bridge
+# ---------------------------------------------------------------------------
+# Same shape as _CallBridge above, but the upstream is ElevenLabs Conv AI
+# instead of OpenAI Realtime. The caller hears the operator's custom
+# ElevenLabs voice (e.g. a cloned voice from their profile). Twilio side is
+# identical — we still pump mulaw 8000 base64 frames in both directions.
+
+class _ElevenLabsBridge:
+    """Bridge a Twilio Media Stream to an ElevenLabs Conv AI conversation."""
+
+    def __init__(self, twilio_ws, *, direction: str, context: str = "") -> None:
+        self.twilio_ws = twilio_ws
+        self.direction = direction
+        self.context = context
+        self.stream_sid: str | None = None
+        self.eleven_ws = None
+        self.closed = asyncio.Event()
+
+    def _voice_id(self) -> str:
+        # Resolution order: explicit secretary voice → general ElevenLabs
+        # voice → the secretary agent profile's premium_voice_id → a known
+        # stock female voice (Rachel) so the agent can at least be created.
+        if settings.elevenlabs_secretary_voice_id:
+            return settings.elevenlabs_secretary_voice_id
+        if settings.elevenlabs_voice_id:
+            return settings.elevenlabs_voice_id
+        try:
+            from app.services.agent_profile_service import agent_profile_service
+            profile = agent_profile_service.get_profile("secretary") or {}
+            vid = str(profile.get("premium_voice_id") or "").strip()
+            if vid:
+                return vid
+        except Exception:
+            pass
+        return "21m00Tcm4TlvDq8ikWAM"  # ElevenLabs "Rachel" — stock fallback
+
+    def _instructions(self) -> str:
+        # Re-uses the same prompt-assembly logic as _CallBridge so behavior
+        # is identical regardless of provider.
+        base = SECRETARY_PHONE_INSTRUCTIONS
+        try:
+            from app.services.user_profile_service import user_profile_service
+            profile_block = user_profile_service.render_context()
+            if profile_block:
+                base += (
+                    "\n\n[Background on Matt — use to personalize responses, never read verbatim]\n"
+                    + profile_block
+                )
+        except Exception:
+            pass
+        if self.context:
+            base += f"\n\n[Current call context: {self.context}]"
+        base += f"\n\n[Call direction: {self.direction}]"
+        # Date grounding — Realtime models have no clock, so without this the
+        # model invents dates ("April eighth" when today is April 25th). The
+        # caller hears the wrong date and either has to correct her or the
+        # calendar event lands in the past. Live observation: this fired in
+        # the very first ElevenLabs test call.
+        from datetime import datetime
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo(settings.app_timezone or "America/New_York"))
+        except Exception:
+            now = datetime.now()
+        base += (
+            f"\n\n[Today's date: {now.strftime('%A, %B %-d, %Y')}. Current time: {now.strftime('%-I:%M %p %Z')}.]"
+            "\n[When the caller says a relative day like 'Monday' or 'next Tuesday', "
+            "compute the actual calendar date from today's date above. Read it back "
+            "with the date number ('Monday, April 27th') so the caller can catch any mismatch.]"
+        )
+        return base
+
+    async def _connect_elevenlabs(self) -> None:
+        """Provision the agent if needed, get a signed URL, open the WS,
+        and send conversation_initiation_client_data with overrides."""
+        import websockets
+
+        from app.services.elevenlabs_convai_service import (
+            ensure_agent,
+            get_signed_ws_url,
+        )
+
+        prompt = self._instructions()
+        voice_id = self._voice_id()
+        first_message = (
+            "Hi, this is Emma — Matt's assistant. How can I help?"
+            if self.direction == "inbound"
+            else "Hi, this is Emma — Matt's assistant — calling on his behalf."
+        )
+
+        agent_id = await ensure_agent(prompt=prompt, voice_id=voice_id, first_message=first_message)
+        signed_url = await get_signed_ws_url(agent_id)
+
+        self.eleven_ws = await websockets.connect(
+            signed_url,
+            max_size=16 * 1024 * 1024,
+        )
+
+        # Send conversation_initiation_client_data with per-call overrides.
+        # The agent's stored config is the floor; this lets us push the
+        # latest persona text + first_message without re-PATCHing the agent
+        # on every single call.
+        await self.eleven_ws.send(
+            json.dumps(
+                {
+                    "type": "conversation_initiation_client_data",
+                    "conversation_config_override": {
+                        "agent": {
+                            "prompt": {"prompt": prompt},
+                            "first_message": first_message,
+                            "language": "en",
+                        },
+                        "tts": {"voice_id": voice_id},
+                    },
+                    "custom_llm_extra_body": {},
+                    # Surfacing the call direction as a piece of dynamic
+                    # context the model can reference without us putting it
+                    # in the prompt itself.
+                    "dynamic_variables": {
+                        "direction": self.direction,
+                        "context": self.context or "",
+                        # Date anchor — also baked into the prompt itself,
+                        # but exposing it as a dynamic variable lets the
+                        # agent reference {{today}} in templated responses
+                        # if the persona is ever ported to the dashboard.
+                        "today": _today_human_string(),
+                    },
+                }
+            )
+        )
+        logger.info("telephony_greeting_primed", extra={"direction": self.direction})
+
+    async def _twilio_to_elevenlabs(self) -> None:
+        """Pump Twilio media frames → ElevenLabs user_audio_chunk."""
+        try:
+            while not self.closed.is_set():
+                raw = await self.twilio_ws.receive_text()
+                msg = json.loads(raw)
+                event = msg.get("event")
+                if event == "start":
+                    self.stream_sid = msg.get("start", {}).get("streamSid")
+                    logger.info(
+                        "telephony_call_started",
+                        extra={"stream_sid": self.stream_sid, "direction": self.direction, "provider": "elevenlabs"},
+                    )
+                elif event == "media" and self.eleven_ws:
+                    payload = msg.get("media", {}).get("payload")
+                    if payload:
+                        await self.eleven_ws.send(
+                            json.dumps({"user_audio_chunk": payload})
+                        )
+                elif event == "stop":
+                    self.closed.set()
+                    break
+        except Exception as exc:
+            logger.info("telephony_twilio_pump_ended", extra={"reason": str(exc)[:120]})
+        finally:
+            self.closed.set()
+
+    async def _elevenlabs_to_twilio(self) -> None:
+        """Pump ElevenLabs Conv AI events → Twilio media frames + tool calls."""
+        audio_deltas = 0
+        try:
+            while not self.closed.is_set():
+                if not self.eleven_ws:
+                    await asyncio.sleep(0.05)
+                    continue
+                raw = await self.eleven_ws.recv()
+                msg = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+                mtype = msg.get("type", "")
+
+                if mtype == "audio":
+                    # Conv AI wraps audio in audio_event.audio_base_64.
+                    audio_event = msg.get("audio_event") or {}
+                    delta = audio_event.get("audio_base_64") or audio_event.get("audio_base64")
+                    if delta and self.stream_sid:
+                        audio_deltas += 1
+                        await self.twilio_ws.send_text(
+                            json.dumps(
+                                {
+                                    "event": "media",
+                                    "streamSid": self.stream_sid,
+                                    "media": {"payload": delta},
+                                }
+                            )
+                        )
+                        if audio_deltas in (1, 10):
+                            logger.info(
+                                "telephony_audio_delta",
+                                extra={"count": audio_deltas, "provider": "elevenlabs"},
+                            )
+
+                elif mtype == "interruption":
+                    # Caller spoke over the agent — flush queued Twilio audio
+                    # so the interruption feels responsive.
+                    if self.stream_sid:
+                        await self.twilio_ws.send_text(
+                            json.dumps({"event": "clear", "streamSid": self.stream_sid})
+                        )
+
+                elif mtype == "user_transcript":
+                    # Caller's recognized speech.
+                    transcript = str(
+                        (msg.get("user_transcription_event") or {}).get("user_transcript")
+                        or msg.get("user_transcript")
+                        or ""
+                    )[:160]
+                    if transcript:
+                        logger.info("telephony_caller_said", extra={"transcript": transcript})
+
+                elif mtype == "agent_response":
+                    transcript = str(
+                        (msg.get("agent_response_event") or {}).get("agent_response")
+                        or msg.get("agent_response")
+                        or ""
+                    )[:160]
+                    if transcript:
+                        logger.info("telephony_assistant_said", extra={"transcript": transcript})
+
+                elif mtype == "client_tool_call":
+                    # The agent wants to invoke one of our tools (calendar,
+                    # etc.). Conv AI client tools always call back to us.
+                    tool_event = msg.get("client_tool_call") or {}
+                    tool_name = str(tool_event.get("tool_name") or "")
+                    tool_call_id = str(tool_event.get("tool_call_id") or "")
+                    tool_params = tool_event.get("parameters") or {}
+                    if isinstance(tool_params, str):
+                        try:
+                            tool_params = json.loads(tool_params)
+                        except Exception:
+                            tool_params = {}
+                    logger.info(
+                        "telephony_tool_call",
+                        extra={
+                            "tool": tool_name,
+                            "args_keys": sorted(tool_params.keys()) if isinstance(tool_params, dict) else [],
+                            "provider": "elevenlabs",
+                        },
+                    )
+                    output = await _call_phone_tool(tool_name, tool_params if isinstance(tool_params, dict) else {})
+                    await self.eleven_ws.send(
+                        json.dumps(
+                            {
+                                "type": "client_tool_result",
+                                "tool_call_id": tool_call_id,
+                                "result": json.dumps(output),
+                                "is_error": "error" in (output or {}),
+                            }
+                        )
+                    )
+                    logger.info("telephony_tool_returned", extra={"tool": tool_name, "provider": "elevenlabs"})
+
+                elif mtype == "ping":
+                    # Conv AI sends keep-alive pings; reply with pong to keep
+                    # the connection from being torn down by their side.
+                    event_id = (msg.get("ping_event") or {}).get("event_id")
+                    if event_id is not None:
+                        await self.eleven_ws.send(
+                            json.dumps({"type": "pong", "event_id": event_id})
+                        )
+
+                elif mtype in ("conversation_initiation_metadata", "agent_response_correction", "vad_score"):
+                    # Useful for telemetry but not actionable on our side.
+                    logger.info("telephony_convai_event", extra={"type": mtype})
+                # All other event types ignored on purpose.
+        except Exception as exc:
+            logger.info(
+                "telephony_elevenlabs_pump_ended",
+                extra={"reason": str(exc)[:120], "audio_deltas": audio_deltas},
+            )
+        finally:
+            self.closed.set()
+
+    async def run(self) -> None:
+        await self._connect_elevenlabs()
+        try:
+            await asyncio.gather(
+                self._twilio_to_elevenlabs(),
+                self._elevenlabs_to_twilio(),
+                return_exceptions=True,
+            )
+        finally:
+            if self.eleven_ws:
+                try:
+                    await self.eleven_ws.close()
+                except Exception:
+                    pass
+
+
+def make_call_bridge(twilio_ws, *, direction: str, context: str = ""):
+    """Pick the right bridge based on settings.secretary_voice_provider.
+
+    Returns an instance with a ``.run()`` coroutine. The route handler
+    awaits it; everything below this function is provider-agnostic.
+    """
+    provider = (settings.secretary_voice_provider or "openai").strip().lower()
+    if provider == "elevenlabs":
+        if not settings.elevenlabs_api_key:
+            logger.warning(
+                "telephony_provider_fallback",
+                extra={"reason": "elevenlabs requested but ELEVENLABS_API_KEY missing"},
+            )
+        else:
+            return _ElevenLabsBridge(twilio_ws, direction=direction, context=context)
+    return _CallBridge(twilio_ws, direction=direction, context=context)
 
 
 class TelephonyService:
@@ -481,8 +824,12 @@ class TelephonyService:
             "placed_at": datetime.now(tz=timezone.utc).isoformat(),
         }
 
-    def new_bridge(self, twilio_ws, *, direction: str, context: str = "") -> _CallBridge:
-        return _CallBridge(twilio_ws, direction=direction, context=context)
+    def new_bridge(self, twilio_ws, *, direction: str, context: str = ""):
+        # Picks the bridge whose upstream matches settings.secretary_voice_provider.
+        # Falls back to OpenAI Realtime when ElevenLabs is requested but
+        # ELEVENLABS_API_KEY isn't set, so misconfiguration never silently
+        # drops a real phone call.
+        return make_call_bridge(twilio_ws, direction=direction, context=context)
 
 
 def validate_twilio_signature(signing_key: str, url: str, params: dict[str, str], signature: str) -> bool:

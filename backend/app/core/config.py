@@ -77,6 +77,23 @@ class Settings(BaseSettings):
     elevenlabs_base_url: str = "https://api.elevenlabs.io/v1"
     elevenlabs_tts_model: str = "eleven_multilingual_v2"
     elevenlabs_voice_id: str = ""
+    # ------------------------------------------------------------------
+    # Secretary phone voice provider. "openai" uses OpenAI Realtime API
+    # (default — best latency, OpenAI's stock voices). "elevenlabs" uses
+    # ElevenLabs Conversational AI so callers hear the operator's custom
+    # cloned voice instead. Trade-off: ElevenLabs has slightly higher
+    # latency (~400ms vs ~250ms) but voice consistency with the desktop
+    # Brain. Switch back to OpenAI by clearing this env var.
+    # ------------------------------------------------------------------
+    secretary_voice_provider: str = "openai"
+    # If set, skip programmatic agent provisioning and use this exact
+    # ElevenLabs Conv AI agent. Useful when the operator has hand-tuned an
+    # agent in the ElevenLabs dashboard.
+    elevenlabs_secretary_agent_id: str = ""
+    # Voice ID the Secretary speaks with on the phone. Falls back to the
+    # general elevenlabs_voice_id, then to the agent profile's premium
+    # voice id, then to a stock female voice.
+    elevenlabs_secretary_voice_id: str = ""
 
     zep_api_key: str = ""
     zep_base_url: str = "https://api.getzep.com"
