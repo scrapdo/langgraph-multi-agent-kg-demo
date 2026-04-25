@@ -19,13 +19,48 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const fs = require('node:fs');
 const http = require('node:http');
+const net = require('node:net');
 const os = require('node:os');
 
-const BACKEND_PORT = parseInt(process.env.BRAIN_PORT || '8000', 10);
+// Port resolution is dynamic so the native app can coexist with the legacy
+// Docker stack (which holds 8000) on the same machine. We resolve at startup
+// and stash the chosen port + URL on these module-level vars; spawnBackend,
+// pingHealth and the URL we hand to the frontend all read from here.
+const PREFERRED_PORT = parseInt(process.env.BRAIN_PORT || '8000', 10);
 const BACKEND_HOST = process.env.BRAIN_HOST || '127.0.0.1';
-const HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
 const HEALTH_POLL_INTERVAL_MS = 500;
 const HEALTH_POLL_TIMEOUT_MS = 60 * 1000;
+let backendPort = PREFERRED_PORT;
+let healthUrl = `http://${BACKEND_HOST}:${backendPort}/health`;
+let apiBaseUrl = `http://${BACKEND_HOST}:${backendPort}`;
+
+/**
+ * Find a free TCP port on BACKEND_HOST starting at PREFERRED_PORT, walking
+ * upward. We try the preferred port first so single-instance installs keep
+ * the familiar 8000; only when something else is squatting it (Docker, a
+ * leftover process) do we slide to 8001+. Returns the chosen port or
+ * throws if 50 consecutive ports are unavailable (vanishingly unlikely on
+ * a normal machine).
+ */
+function pickFreePort(start) {
+  const tryBind = (port) =>
+    new Promise((resolve) => {
+      const tester = net.createServer();
+      tester.once('error', () => resolve(false));
+      tester.once('listening', () => {
+        tester.close(() => resolve(true));
+      });
+      tester.listen(port, BACKEND_HOST);
+    });
+  return (async () => {
+    for (let i = 0; i < 50; i++) {
+      const port = start + i;
+      // eslint-disable-next-line no-await-in-loop
+      if (await tryBind(port)) return port;
+    }
+    throw new Error(`No free port found between ${start} and ${start + 49}.`);
+  })();
+}
 
 // The required keys the backend needs before it can do anything useful.
 // If config.json is missing all of these, we show the first-run wizard.
@@ -121,7 +156,7 @@ function hasMinimumConfig(cfg) {
 
 function envForBackend(cfg) {
   const env = { ...process.env };
-  env.BRAIN_PORT = String(BACKEND_PORT);
+  env.BRAIN_PORT = String(backendPort);
   env.BRAIN_HOST = BACKEND_HOST;
   env.BRAIN_DATA_DIR = dataDir();
   // Flatten config into env vars. The backend picks them up via pydantic-settings.
@@ -206,7 +241,7 @@ async function stopBackend() {
 
 function pingHealth() {
   return new Promise((resolve) => {
-    const req = http.get(HEALTH_URL, (res) => {
+    const req = http.get(healthUrl, (res) => {
       res.resume();
       resolve(res.statusCode && res.statusCode >= 200 && res.statusCode < 400);
     });
@@ -233,6 +268,18 @@ async function waitForHealth(onTick) {
 
 async function startServices({ splashWindow, app }) {
   fs.mkdirSync(dataDir(), { recursive: true });
+
+  // Resolve a free port BEFORE we read config / spawn anything. If 8000 is
+  // taken (Docker stack, another Brain instance, etc.) we slide upward.
+  // The chosen port flows through to the spawned backend, the health URL,
+  // and the frontend's API base.
+  backendPort = await pickFreePort(PREFERRED_PORT);
+  healthUrl = `http://${BACKEND_HOST}:${backendPort}/health`;
+  apiBaseUrl = `http://${BACKEND_HOST}:${backendPort}`;
+  if (backendPort !== PREFERRED_PORT) {
+    // eslint-disable-next-line no-console
+    console.log(`[launcher] port ${PREFERRED_PORT} in use; bound to ${backendPort} instead.`);
+  }
 
   const cfg = readConfig();
   if (!hasMinimumConfig(cfg)) {
@@ -266,7 +313,7 @@ async function startServices({ splashWindow, app }) {
   if (!healthy) {
     await stopBackend();
     throw new Error(
-      `The backend did not come online on ${HEALTH_URL} within ${HEALTH_POLL_TIMEOUT_MS / 1000}s.\n` +
+      `The backend did not come online on ${healthUrl} within ${HEALTH_POLL_TIMEOUT_MS / 1000}s.\n` +
         'Check the console for [backend] log lines.',
     );
   }
@@ -274,12 +321,21 @@ async function startServices({ splashWindow, app }) {
   sendPhase(splashWindow, { phase: 'ready', message: 'Opening the console…', progress: 100 });
 
   const frontend = resolveFrontendIndex(app);
+  // Tag the frontend URL with the resolved API base so the bundled JS can
+  // hit the right port even though it was built with localhost:8000 baked
+  // in. The inline script in frontend/index.html reads ?api_base= and
+  // promotes it to window.__BRAIN_API_BASE__ before React mounts.
+  const baseUrl = frontend.kind === 'http' ? frontend.url : `file://${frontend.path}`;
+  const sep = baseUrl.includes('?') ? '&' : '?';
+  const frontendUrl = `${baseUrl}${sep}api_base=${encodeURIComponent(apiBaseUrl)}`;
   return {
     // Kept for main.js backward compatibility.
-    frontendUrl: frontend.kind === 'http' ? frontend.url : `file://${frontend.path}`,
+    frontendUrl,
     frontend,
     composeFile: null, // legacy field — always null in native mode
-    backendHealthUrl: HEALTH_URL,
+    backendHealthUrl: healthUrl,
+    backendApiBase: apiBaseUrl,
+    backendPort,
   };
 }
 

@@ -14,6 +14,21 @@
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      Runtime backend URL bridge. The native app may bind a non-default
+      port (e.g. 8001 when Docker holds 8000) and pass the resolved URL
+      via `?api_base=...`. We promote it to a window global before the
+      React bundle loads so each module's API_BASE constant picks it up
+      at module init. No-op in browser dev mode where the param is absent.
+    -->
+    <script>
+      (function () {
+        try {
+          var p = new URLSearchParams(window.location.search).get('api_base');
+          if (p) window.__BRAIN_API_BASE__ = p;
+        } catch (_) {}
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

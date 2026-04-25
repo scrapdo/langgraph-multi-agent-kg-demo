@@ -758,7 +758,7 @@ export function MissionControl({ onRunChange, onEnterVoiceMode }: Props) {
     let cancelled = false;
     const ping = async () => {
       try {
-        const res = await fetch(`${(import.meta.env.VITE_API_BASE as string) ?? 'http://localhost:8000'}/health`);
+        const res = await fetch(`${(typeof window !== 'undefined' && (window as any).__BRAIN_API_BASE__) || (import.meta.env.VITE_API_BASE as string | undefined) || 'http://localhost:8000'}/health`);
         if (!cancelled) setApiOnline(res.ok);
       } catch {
         if (!cancelled) setApiOnline(false);

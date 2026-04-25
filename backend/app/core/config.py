@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     google_workspace_token_store_path: str = "data/google_workspace_tokens.json"
     google_workspace_user: str = "me"
     google_calendar_id: str = "primary"
+    # Calendar backend used by the Secretary phone + desktop voice agent.
+    # "macos" goes through the host bridge → AppleScript → Calendar.app
+    # (~20-30s for list-range, works offline, no setup). "google" goes
+    # direct to the Google Calendar API (sub-500ms, requires OAuth, follows
+    # the user across devices). Switch via secrets.env when calendar
+    # interaction is routine — the latency difference is huge.
+    calendar_provider: str = "macos"
     ai_influencer_app_url: str = ""
     ai_influencer_app_name: str = ""
     ai_influencer_app_path: str = ""

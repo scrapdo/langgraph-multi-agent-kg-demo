@@ -104,6 +104,8 @@ function showComposerWindow() {
  * decrement the dock badge. Used for both mini-composer and in-app
  * "send in background" submissions.
  */
+let backendApiBase = 'http://127.0.0.1:8000';
+
 async function watchRunAndNotify(runId, title) {
   if (!runId) return;
   incrementBadge();
@@ -111,7 +113,7 @@ async function watchRunAndNotify(runId, title) {
   const started = Date.now();
   const poll = () =>
     new Promise((resolve) => {
-      const req = http.get(`http://127.0.0.1:8000/runs/${runId}`, (res) => {
+      const req = http.get(`${backendApiBase}/runs/${runId}`, (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
@@ -307,7 +309,8 @@ function createWizardWindow() {
 
 async function startBackendAfterWizard() {
   try {
-    const { frontendUrl, composeFile } = await startServices({ splashWindow, app });
+    const { frontendUrl, composeFile, backendApiBase: api } = await startServices({ splashWindow, app });
+    if (typeof api === 'string' && api) backendApiBase = api;
     composeFilePath = composeFile;
     setTimeout(() => {
       createMainWindow(frontendUrl);
@@ -351,7 +354,8 @@ async function boot() {
   await clearCacheOnBoot();
 
   try {
-    const { frontendUrl, composeFile } = await startServices({ splashWindow, app });
+    const { frontendUrl, composeFile, backendApiBase: api } = await startServices({ splashWindow, app });
+    if (typeof api === 'string' && api) backendApiBase = api;
     composeFilePath = composeFile;
 
     // Small delay so users see the "ready" step briefly before the swap.
@@ -400,7 +404,8 @@ ipcMain.handle('window-state', () => ({
 ipcMain.on('startup-retry', async () => {
   if (splashWindow) {
     try {
-      const { frontendUrl, composeFile } = await startServices({ splashWindow, app });
+      const { frontendUrl, composeFile, backendApiBase: api } = await startServices({ splashWindow, app });
+    if (typeof api === 'string' && api) backendApiBase = api;
       composeFilePath = composeFile;
       setTimeout(() => {
         createMainWindow(frontendUrl);

@@ -20,7 +20,10 @@ class GoogleWorkspaceService:
     auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
     scopes = [
         "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/calendar.readonly",
+        # calendar.events covers list + create + update on events without
+        # giving us access to the user's calendar list/settings — minimum
+        # privilege for the Secretary phone's calendar tools.
+        "https://www.googleapis.com/auth/calendar.events",
     ]
 
     def __init__(self, token_store_path: str) -> None:
@@ -388,6 +391,153 @@ class GoogleWorkspaceService:
             sender = str(msg.get("from") or "sender")
             suggestions.append(f"- Reply to '{subject}' from {sender}: acknowledge receipt, answer the core ask, and propose a next step if needed.")
         return suggestions
+
+    # ------------------------------------------------------------------
+    # Calendar tools — used by the Secretary phone (and the desktop voice
+    # agent) when settings.calendar_provider == "google". Mirror the shape
+    # of the macOS host-bridge endpoints so the dispatcher in
+    # app_control_service can swap providers without callers caring.
+    # ------------------------------------------------------------------
+
+    def _local_now(self) -> datetime:
+        """Today, in operator timezone. Used as the start of 'today' for
+        list_today and as the anchor for date math in list_range."""
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(settings.app_timezone or "America/New_York"))
+        except Exception:
+            return datetime.now()
+
+    def _format_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Map Google's event payload into the same {title, start, end,
+        calendar} shape the macOS bridge already returns, so consumers see
+        the same fields regardless of provider."""
+        start = (event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date") or ""
+        end = (event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date") or ""
+        return {
+            "title": event.get("summary", "(untitled)"),
+            "start": start,
+            "end": end,
+            "calendar": event.get("organizer", {}).get("email") or settings.google_calendar_id or "",
+            "id": event.get("id"),
+            "htmlLink": event.get("htmlLink"),
+            "location": event.get("location") or "",
+        }
+
+    def list_today_events(self) -> dict[str, Any]:
+        """Return today's events in the operator's calendar, in operator
+        timezone. Shape mirrors the macOS host-bridge /calendar/list-today
+        response so the dispatcher can swap providers transparently."""
+        if not self.connected():
+            raise RuntimeError("Google Workspace not connected — connect via /google/oauth/start.")
+
+        now = self._local_now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_of_day = start_of_day + timedelta(days=1)
+        return self._list_events(start_of_day, end_of_day)
+
+    def list_range_events(self, days_ahead: int = 7) -> dict[str, Any]:
+        """Return events in the next ``days_ahead`` days (1–14)."""
+        if not self.connected():
+            raise RuntimeError("Google Workspace not connected — connect via /google/oauth/start.")
+
+        days = max(1, min(14, int(days_ahead)))
+        now = self._local_now()
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_window = start_of_day + timedelta(days=days)
+        result = self._list_events(start_of_day, end_window)
+        result["days_ahead"] = days
+        return result
+
+    def _list_events(self, time_min: datetime, time_max: datetime) -> dict[str, Any]:
+        """Workhorse for the two list_* methods above. Uses the same
+        events.list endpoint as fetch_brief_data with a custom window."""
+        headers = self._headers()
+        params = {
+            "maxResults": 50,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "timeMin": time_min.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "timeMax": time_max.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        with httpx.Client(timeout=15, headers=headers) as client:
+            resp = client.get(
+                f"{self.base_calendar_url}/calendars/{settings.google_calendar_id}/events",
+                params=params,
+            )
+            resp.raise_for_status()
+        body = resp.json()
+        events = [self._format_event(item) for item in body.get("items", [])]
+        return {
+            "ok": True,
+            "app": "calendar",
+            "provider": "google",
+            "events": events,
+            "count": len(events),
+        }
+
+    def create_event(
+        self,
+        *,
+        title: str,
+        start_iso: str,
+        end_iso: str,
+        notes: str = "",
+        calendar_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a single calendar event. start_iso/end_iso accept either
+        a naive ISO string (treated as operator-local time) or a fully
+        timezoned ISO 8601 string. Notes flow into description.
+        """
+        if not self.connected():
+            raise RuntimeError("Google Workspace not connected — connect via /google/oauth/start.")
+
+        cal_id = (calendar_id or settings.google_calendar_id or "primary").strip()
+
+        # Normalize: if the caller passed a naive ISO ("2026-04-27T09:00:00")
+        # interpret it in operator timezone. If they passed a timezoned one,
+        # preserve. Google's API accepts either, but we want consistent
+        # behavior with the macOS path which always treats input as local.
+        local_tz = settings.app_timezone or "America/New_York"
+
+        def _normalize(value: str) -> tuple[str, str]:
+            value = value.strip()
+            # Already has a Z or +-HH:MM offset → trust it.
+            if value.endswith("Z") or (len(value) >= 6 and value[-6] in "+-" and value[-3] == ":"):
+                return value, ""
+            # Naive — Google needs an explicit timezone. Pass the timezone
+            # name in the timeZone field; leave the dateTime stripped of
+            # any tz suffix.
+            return value, local_tz
+
+        start_dt, start_tz = _normalize(start_iso)
+        end_dt, end_tz = _normalize(end_iso)
+
+        body: dict[str, Any] = {
+            "summary": title,
+            "description": notes or "",
+            "start": {"dateTime": start_dt} | ({"timeZone": start_tz} if start_tz else {}),
+            "end": {"dateTime": end_dt} | ({"timeZone": end_tz} if end_tz else {}),
+        }
+
+        headers = self._headers()
+        with httpx.Client(timeout=15, headers=headers) as client:
+            resp = client.post(
+                f"{self.base_calendar_url}/calendars/{cal_id}/events",
+                json=body,
+            )
+            resp.raise_for_status()
+        event = resp.json()
+        return {
+            "ok": True,
+            "app": "calendar",
+            "provider": "google",
+            "event_id": event.get("id"),
+            "htmlLink": event.get("htmlLink"),
+            "title": title,
+            "start": start_dt,
+            "end": end_dt,
+        }
 
     def _morning_brief(self, messages: list[dict[str, Any]], events: list[dict[str, Any]], overlap_notes: list[str]) -> list[str]:
         lines = [

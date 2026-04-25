@@ -208,6 +208,17 @@ class AppControlService:
         dispatcher = _ACTIONS.get(key)
         if not dispatcher:
             raise AppControlError(f"Unknown action: {app_clean}.{action_clean}")
+
+        # Calendar provider switch — for the calendar.* actions, route
+        # through Google Calendar API (sub-500ms) instead of the macOS
+        # host bridge (20-30s) when settings.calendar_provider == "google".
+        # Same response shape as the macOS bridge so callers don't care.
+        if (
+            app_clean == "calendar"
+            and (settings.calendar_provider or "macos").strip().lower() == "google"
+        ):
+            return await self._execute_google_calendar(action_clean, args or {})
+
         path, body = dispatcher(args or {})
 
         # Cache slow read-only calls. Body keying is deterministic — sorted
@@ -238,6 +249,96 @@ class AppControlService:
             payload = response.json()
         except Exception:
             payload = {"ok": True, "raw": response.text[:1000]}
+        if cache_key is not None:
+            _response_cache[cache_key] = (time.monotonic(), payload)
+        return payload
+
+    async def _execute_google_calendar(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        """Route calendar.* actions through Google Calendar instead of the
+        macOS host bridge. Response shape matches the host-bridge endpoints
+        so the secretary phone doesn't need to care which provider it is.
+
+        Cache hits land in the same _response_cache (keyed by provider in
+        the args repr) so flipping providers mid-session doesn't show stale
+        data from the other provider.
+        """
+        from app.services.google_workspace_service import google_workspace_service
+        import asyncio as _asyncio
+
+        # Cache slow read-only calls — Google list endpoints are fast (~200-
+        # 500ms) but the cache still helps when an LLM fires the same
+        # lookup twice in a turn. Keep TTL identical so flipping providers
+        # gives consistent freshness expectations.
+        cache_key: tuple[str, str, str] | None = None
+        if ("calendar", action) in _CACHEABLE:
+            cache_key = (
+                "calendar",
+                action,
+                repr(sorted([("provider", "google")] + list(args.items()))),
+            )
+            cached = _response_cache.get(cache_key)
+            if cached is not None:
+                ts, payload = cached
+                if time.monotonic() - ts < _CACHE_TTL_SECONDS:
+                    return payload
+
+        try:
+            if action == "list_today":
+                payload = await _asyncio.to_thread(google_workspace_service.list_today_events)
+            elif action == "list_range":
+                raw = args.get("days_ahead") or args.get("days") or 7
+                try:
+                    days = int(raw)
+                except (TypeError, ValueError):
+                    days = 7
+                days = max(1, min(14, days))
+                payload = await _asyncio.to_thread(google_workspace_service.list_range_events, days)
+            elif action == "create":
+                # Reuse the same arg-name flexibility the macOS dispatcher
+                # has — LLMs emit a variety of field name variants.
+                title = str(
+                    args.get("title")
+                    or args.get("summary")
+                    or args.get("name")
+                    or args.get("event")
+                    or ""
+                ).strip()
+                start_iso = str(
+                    args.get("start_iso")
+                    or args.get("start")
+                    or args.get("startDate")
+                    or args.get("start_date")
+                    or args.get("startTime")
+                    or args.get("start_time")
+                    or args.get("begin")
+                    or ""
+                ).strip()
+                end_iso = str(
+                    args.get("end_iso")
+                    or args.get("end")
+                    or args.get("endDate")
+                    or args.get("end_date")
+                    or args.get("endTime")
+                    or args.get("end_time")
+                    or ""
+                ).strip()
+                notes = str(args.get("notes") or args.get("description") or args.get("body") or "").strip()
+                if not (title and start_iso and end_iso):
+                    raise AppControlError("calendar.create requires title, start_iso, end_iso.")
+                payload = await _asyncio.to_thread(
+                    google_workspace_service.create_event,
+                    title=title,
+                    start_iso=start_iso,
+                    end_iso=end_iso,
+                    notes=notes,
+                )
+            else:
+                raise AppControlError(f"Unsupported calendar action for Google: {action}")
+        except RuntimeError as exc:
+            raise AppControlError(str(exc)) from exc
+        except Exception as exc:
+            raise AppControlError(f"Google Calendar call failed: {exc}") from exc
+
         if cache_key is not None:
             _response_cache[cache_key] = (time.monotonic(), payload)
         return payload

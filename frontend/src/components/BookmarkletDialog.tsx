@@ -2,7 +2,7 @@ import { Check, Copy, Globe } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Button, Dialog, DialogContent } from '../ui';
 
-const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8000';
+const API_BASE = (typeof window !== 'undefined' && (window as any).__BRAIN_API_BASE__) || (import.meta.env.VITE_API_BASE as string | undefined) || 'http://localhost:8000';
 
 interface Props {
   open: boolean;
