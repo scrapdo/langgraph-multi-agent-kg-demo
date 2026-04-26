@@ -3,11 +3,60 @@ import { cn } from '../ui/cn';
 
 export type VisualizerState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
+/** Palette code: "warm" = pink→red (feminine voices), "cool" = blue→green
+ *  (masculine voices). The orb's ring color, halo, and LED grid all swap
+ *  to the matching palette so the visualizer signals who's speaking. */
+export type VisualizerPalette = 'warm' | 'cool';
+
 interface Props {
   state: VisualizerState;
   /** 0-1 live audio level. Modulates ring brightness/pulse. */
   level?: number;
+  /** Active speaker's palette. Smoothly crossfaded when it changes. */
+  palette?: VisualizerPalette;
   className?: string;
+}
+
+// Palette colors as RGB triples (linear-ish, no gamma). Tuned so each is
+// recognizable at a glance: warm reads as feminine identity, cool reads
+// as masculine identity, and both stay vivid against the dark backdrop.
+const WARM = {
+  corePrimary:   [1.00, 0.30, 0.55] as const,    // hot pink
+  coreSecondary: [1.00, 0.20, 0.40] as const,    // crimson
+  haloPrimary:   [1.00, 0.36, 0.42] as const,    // rose
+  haloSecondary: [0.92, 0.20, 0.30] as const,    // deep red
+  haloTertiary:  [0.55, 0.10, 0.30] as const,    // wine purple — inner ghost
+  ledA:          [1.00, 0.68, 0.70] as const,
+  ledB:          [1.00, 0.40, 0.45] as const,
+  ledC:          [1.00, 0.85, 0.78] as const,
+  trailGlow:     [1.00, 0.55, 0.40] as const,
+  reactiveHalo:  [0.95, 0.30, 0.55] as const,
+  fineDash:      [1.00, 0.45, 0.50] as const,
+};
+const COOL = {
+  corePrimary:   [0.20, 0.55, 1.00] as const,    // electric blue
+  coreSecondary: [0.10, 0.85, 0.70] as const,    // teal-cyan
+  haloPrimary:   [0.30, 0.70, 0.90] as const,
+  haloSecondary: [0.18, 0.60, 0.80] as const,
+  haloTertiary:  [0.10, 0.30, 0.55] as const,
+  ledA:          [0.65, 0.85, 1.00] as const,
+  ledB:          [0.30, 0.85, 0.80] as const,
+  ledC:          [0.85, 0.95, 0.95] as const,
+  trailGlow:     [0.40, 0.80, 1.00] as const,
+  reactiveHalo:  [0.40, 0.80, 0.95] as const,
+  fineDash:      [0.55, 0.85, 1.00] as const,
+};
+
+function paletteColors(palette: VisualizerPalette) {
+  return palette === 'warm' ? WARM : COOL;
+}
+
+function lerpRgb(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+  t: number,
+): [number, number, number] {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 }
 
 // ============================================================================
@@ -47,6 +96,21 @@ uniform float u_time;
 uniform vec2  u_resolution;
 uniform float u_intensity;
 uniform float u_energy;
+
+// Palette uniforms — swap to match the active speaker's palette
+// (warm = feminine, cool = masculine). Smoothly interpolated on
+// the JS side when the active agent changes.
+uniform vec3  u_corePrimary;
+uniform vec3  u_coreSecondary;
+uniform vec3  u_haloPrimary;
+uniform vec3  u_haloSecondary;
+uniform vec3  u_haloTertiary;
+uniform vec3  u_ledA;
+uniform vec3  u_ledB;
+uniform vec3  u_ledC;
+uniform vec3  u_trailGlow;
+uniform vec3  u_reactiveHalo;
+uniform vec3  u_fineDash;
 
 float hash12(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -126,56 +190,53 @@ void main() {
   float ringG = ringMask(rG, 0.35, 0.010, aaR);
   float ringB = ringMask(rB, 0.35, 0.010, aaR);
 
-  vec3 corePink = vec3(1.0, 0.3, 0.8) * 2.0;
-  vec3 sharpPink = vec3(1.0, 0.2, 0.7);
+  vec3 coreP = u_corePrimary * 2.0;
+  vec3 coreS = u_coreSecondary;
 
-  col += corePink * vec3(ringR, ringG, ringB);
-  col += sharpPink * 1.25 * ringMask(r, 0.348, 0.0045, aaR);
+  col += coreP * vec3(ringR, ringG, ringB);
+  col += coreS * 1.25 * ringMask(r, 0.348, 0.0045, aaR);
 
   float glowR = exp(-abs(rR - 0.38) * 15.0);
   float glowG = exp(-abs(rG - 0.38) * 15.0);
   float glowB = exp(-abs(rB - 0.38) * 15.0);
 
-  vec3 outerBlue = vec3(0.2, 0.4, 1.0);
-  vec3 edgeBlue = vec3(0.1, 0.5, 1.0);
-
-  col += outerBlue * vec3(glowR, glowG, glowB) * 0.85;
-  col += edgeBlue * exp(-abs(r - 0.405) * 32.0) * 1.15;
+  col += u_haloPrimary * vec3(glowR, glowG, glowB) * 0.85;
+  col += u_haloSecondary * exp(-abs(r - 0.405) * 32.0) * 1.15;
 
   float halo = exp(-abs(r - 0.39) * 8.5) * smoothstep(0.21, 0.46, r) * (1.0 - smoothstep(0.60, 0.85, r));
-  col += vec3(0.18, 0.08, 0.9) * halo * 0.85;
+  col += u_haloTertiary * halo * 0.85;
 
   float ledR = ledMask(r * 0.995, a, t, aaR);
   float ledG = ledMask(r * 1.010, a, t, aaR);
   float ledB = ledMask(r * 1.030, a, t, aaR);
 
   vec3 ledCA = vec3(ledR, ledG, ledB);
-  vec3 ledColor = vec3(1.0, 0.68, 0.95) * ledR * 1.35 +
-                  vec3(0.28, 0.65, 1.0) * ledCA * 1.75 +
-                  vec3(1.0, 0.95, 0.78) * min(ledR, min(ledG, ledB)) * 1.15;
+  vec3 ledColor = u_ledA * ledR * 1.35 +
+                  u_ledB * ledCA * 1.75 +
+                  u_ledC * min(ledR, min(ledG, ledB)) * 1.15;
 
   // Audio-driven LED brightness boost — voice activity clearly intensifies
   // the dot matrix.
   col += ledColor * (1.0 + u_energy * 1.4);
 
-  // Audio-reactive outer halo — a wider, softer pink/blue glow that
-  // expands outward when the voice is loud. Adds the "ring breathing
-  // outward with each syllable" feel.
+  // Audio-reactive outer halo — a wider, softer glow that expands outward
+  // when the voice is loud. Color matches the active palette so the
+  // "breathing" reads as a feminine pink or masculine cyan accordingly.
   float reactiveGlow = exp(-abs(r - 0.42) * 6.5) * u_energy * 1.2;
-  col += vec3(0.55, 0.30, 0.95) * reactiveGlow;
+  col += u_reactiveHalo * reactiveGlow;
 
   float trail = pow(fract(a * 5.0 + t), 3.0);
   float trailGlow = exp(-abs(r - (0.37 + trail * 0.045)) * 38.0);
   float polarBits = smoothstep(0.78, 0.98, fract((a + sin(r * 10.0 - t) * 0.1) * 32.0));
-  col += vec3(0.25, 0.55, 1.0) * trailGlow * polarBits * trail * 0.75;
+  col += u_trailGlow * trailGlow * polarBits * trail * 0.75;
 
   float innerGhost = exp(-abs(r - 0.30) * 22.0) * (0.5 + 0.5 * sin(a * 6.0 + t * 1.7));
-  col += vec3(0.05, 0.0, 0.08) * innerGhost;
+  col += u_haloTertiary * 0.06 * innerGhost;
 
   float fineDash = ringMask(r, 0.333, 0.0022, aaR);
   float dashF = fract((a + sin(r * 10.0 - t) * 0.1) * 58.0);
   float dash = smoothstep(0.08, 0.14, dashF) * (1.0 - smoothstep(0.36, 0.46, dashF));
-  col += vec3(1.0, 0.45, 0.85) * fineDash * dash * 1.45;
+  col += u_fineDash * fineDash * dash * 1.45;
 
   float vignette = smoothstep(0.95, 0.15, length(uv));
   col *= vignette;
@@ -190,12 +251,17 @@ void main() {
 }
 `;
 
-export function HumanoidVisualizer({ state, level, className }: Props) {
+export function HumanoidVisualizer({ state, level, palette = 'cool', className }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<VisualizerState>(state);
   const levelRef = useRef<number | undefined>(level);
+  const paletteRef = useRef<VisualizerPalette>(palette);
   const intensityRef = useRef(0);
   const energyRef = useRef(0);
+  // Crossfade factor for palette transitions: 0 = fully showing previous
+  // palette, 1 = fully showing current palette. Eased over ~600ms.
+  const paletteMixRef = useRef(1);
+  const prevPaletteRef = useRef<VisualizerPalette>(palette);
 
   useEffect(() => {
     stateRef.current = state;
@@ -203,6 +269,15 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
   useEffect(() => {
     levelRef.current = level;
   }, [level]);
+  useEffect(() => {
+    if (palette !== paletteRef.current) {
+      // Snapshot the OLD palette as the "from" side of the crossfade,
+      // then start interpolating toward the NEW palette over ~600ms.
+      prevPaletteRef.current = paletteRef.current;
+      paletteRef.current = palette;
+      paletteMixRef.current = 0;
+    }
+  }, [palette]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -256,6 +331,17 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
     const uRes = gl.getUniformLocation(prog, 'u_resolution');
     const uIntensity = gl.getUniformLocation(prog, 'u_intensity');
     const uEnergy = gl.getUniformLocation(prog, 'u_energy');
+    const uCorePrimary    = gl.getUniformLocation(prog, 'u_corePrimary');
+    const uCoreSecondary  = gl.getUniformLocation(prog, 'u_coreSecondary');
+    const uHaloPrimary    = gl.getUniformLocation(prog, 'u_haloPrimary');
+    const uHaloSecondary  = gl.getUniformLocation(prog, 'u_haloSecondary');
+    const uHaloTertiary   = gl.getUniformLocation(prog, 'u_haloTertiary');
+    const uLedA           = gl.getUniformLocation(prog, 'u_ledA');
+    const uLedB           = gl.getUniformLocation(prog, 'u_ledB');
+    const uLedC           = gl.getUniformLocation(prog, 'u_ledC');
+    const uTrailGlow      = gl.getUniformLocation(prog, 'u_trailGlow');
+    const uReactiveHalo   = gl.getUniformLocation(prog, 'u_reactiveHalo');
+    const uFineDash       = gl.getUniformLocation(prog, 'u_fineDash');
 
     const resize = () => {
       const { width, height } = canvas.getBoundingClientRect();
@@ -295,12 +381,40 @@ export function HumanoidVisualizer({ state, level, className }: Props) {
       // discrete pulses instead of getting averaged out.
       energyRef.current += (targetEnergy - energyRef.current) * 0.30;
 
+      // Palette crossfade — when the active speaker changes, ease the
+      // mix from 0 to 1 over ~600ms. Smooth, not snappy: speakers usually
+      // don't bounce back-and-forth fast enough for snap-cuts to look good.
+      if (paletteMixRef.current < 1) {
+        paletteMixRef.current = Math.min(1, paletteMixRef.current + (1 / 36)); // ~600ms at 60fps
+      }
+      const fromColors = paletteColors(prevPaletteRef.current);
+      const toColors = paletteColors(paletteRef.current);
+      const mix = paletteMixRef.current;
+      const blend = (
+        key:
+          | 'corePrimary' | 'coreSecondary'
+          | 'haloPrimary' | 'haloSecondary' | 'haloTertiary'
+          | 'ledA' | 'ledB' | 'ledC'
+          | 'trailGlow' | 'reactiveHalo' | 'fineDash'
+      ) => lerpRgb(fromColors[key], toColors[key], mix);
+
       gl.useProgram(prog);
       gl.bindVertexArray(vao);
       gl.uniform1f(uTime, t / 1000);
       gl.uniform2f(uRes, canvas.width, canvas.height);
       gl.uniform1f(uIntensity, intensityRef.current);
       gl.uniform1f(uEnergy, energyRef.current);
+      gl.uniform3fv(uCorePrimary,   blend('corePrimary'));
+      gl.uniform3fv(uCoreSecondary, blend('coreSecondary'));
+      gl.uniform3fv(uHaloPrimary,   blend('haloPrimary'));
+      gl.uniform3fv(uHaloSecondary, blend('haloSecondary'));
+      gl.uniform3fv(uHaloTertiary,  blend('haloTertiary'));
+      gl.uniform3fv(uLedA,          blend('ledA'));
+      gl.uniform3fv(uLedB,          blend('ledB'));
+      gl.uniform3fv(uLedC,          blend('ledC'));
+      gl.uniform3fv(uTrailGlow,     blend('trailGlow'));
+      gl.uniform3fv(uReactiveHalo,  blend('reactiveHalo'));
+      gl.uniform3fv(uFineDash,      blend('fineDash'));
 
       gl.clearColor(0, 0, 0, 1);
       gl.clear(gl.COLOR_BUFFER_BIT);

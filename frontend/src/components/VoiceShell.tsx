@@ -14,7 +14,36 @@ import { useProactiveBriefings } from '../lib/useProactiveBriefings';
 import { useRealtimeAgent, type RealtimeState, type RealtimeToolCall } from '../lib/useRealtimeAgent';
 import { useSpecialistHandoff, type SpecialistArtifact } from '../lib/useSpecialistHandoff';
 import { Badge, Button, Card, Input, cn } from '../ui';
-import { HumanoidVisualizer, type VisualizerState } from './HumanoidVisualizer';
+import { HumanoidVisualizer, type VisualizerState, type VisualizerPalette } from './HumanoidVisualizer';
+
+// Maps agent_id → orb palette. Warm = pink/red (feminine voices),
+// cool = blue/green (masculine + neutral voices). Mirrors the
+// `palette` field in backend/data/agent_profiles.json.
+const AGENT_PALETTE: Record<string, VisualizerPalette> = {
+  coordinator: 'cool',
+  researcher:  'cool',
+  critic:      'cool',
+  writer:      'cool',
+  coding:      'cool',
+  shopper:     'warm',
+  social:      'cool',
+  secretary:   'warm',
+  wellness:    'warm',
+};
+
+// Display name shown in the Voice Stage caption header for the active
+// speaker. Mirrors `name` field in agent_profiles.json.
+const ACTIVE_AGENT_LABELS: Record<string, string> = {
+  coordinator: 'Brain',
+  secretary:   'Emma',
+  wellness:    'Grace',
+  shopper:     'Michelle',
+  researcher:  'Leo',
+  critic:      'Frank',
+  writer:      'George',
+  coding:      'Chad',
+  social:      'Antonio',
+};
 import { OutputsRail } from './OutputsRail';
 
 type TranscriptRole = 'you' | 'delegator' | 'specialist' | 'system';
@@ -64,6 +93,12 @@ export function VoiceShell() {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [textInput, setTextInput] = useState('');
   const [faceOn, setFaceOn] = useState(false);
+  // Tracks which agent's persona is currently "speaking" — drives the
+  // visualizer palette (warm vs cool). Defaults to coordinator (Brain).
+  // Updated to a specialist's id when route_to_specialist runs; reset to
+  // coordinator when the run completes/fails or when the operator starts
+  // a new turn.
+  const [activeAgentId, setActiveAgentId] = useState<string>('coordinator');
   const pendingCallsRef = useRef<Map<string, RealtimeToolCall>>(new Map());
 
   const pushTranscript = useCallback((role: TranscriptRole, text: string) => {
@@ -90,6 +125,8 @@ export function VoiceShell() {
         });
         realtime.sendToolResult(pendingEntry.callId, payload);
       }
+      // Specialist done — visual identity returns to the Coordinator.
+      setActiveAgentId('coordinator');
     },
     onFailed: (artifact, message) => {
       pushTranscript('system', `${artifact.agentLabel} failed: ${message}`);
@@ -98,6 +135,7 @@ export function VoiceShell() {
         pendingCallsRef.current.delete(artifact.runId);
         realtime.sendToolResult(pendingEntry.callId, JSON.stringify({ status: 'failed', error: message }));
       }
+      setActiveAgentId('coordinator');
     },
   });
 
@@ -132,6 +170,9 @@ export function VoiceShell() {
         const agentId = String((call.args as { agent_id?: string }).agent_id ?? 'writer');
         const task = String((call.args as { task?: string }).task ?? '').trim();
         pushTranscript('system', `Routing to ${agentId}…`);
+        // Hand the visual identity off to the specialist. Visualizer
+        // crossfades the orb palette over ~600ms.
+        setActiveAgentId(agentId);
         void handoff.runFromToolCall({ agent_id: agentId, task }).then((artifact) => {
           pendingCallsRef.current.set(artifact.runId, call);
         });
@@ -363,198 +404,228 @@ export function VoiceShell() {
   const visualizerState = useMemo(() => realtimeToVisualizer(realtime.state), [realtime.state]);
   // Drive the visualizer off whichever side is louder — input while listening, output while speaking.
   const level = Math.max(realtime.inputLevel, realtime.outputLevel);
+  // Palette tracks the active speaker. Falls back to cool for any
+  // unmapped agent.
+  const visualizerPalette: VisualizerPalette = AGENT_PALETTE[activeAgentId] ?? 'cool';
+  // While the operator is speaking (state=listening), surface the
+  // operator's "voice" with the cool palette — Brain is listening, not
+  // a specialist. Same for thinking. Only commit to the specialist
+  // palette when the AI is actually speaking back.
+  const effectivePalette: VisualizerPalette =
+    realtime.state === 'speaking' ? visualizerPalette : 'cool';
 
   const lastYou = [...transcript].reverse().find((t) => t.role === 'you');
   const lastDelegator = [...transcript].reverse().find((t) => t.role === 'delegator');
 
+  // Voice Stage layout (Option D). Orb-dominant, immersive. Captions
+  // float over the orb. Bottom dock auto-hides on cursor proximity.
+  // No sidebar (the AppShell strips chrome for this workspace).
+  const isCallActive = realtime.state !== 'idle' && realtime.state !== 'error';
+  const speakingAgentName = ACTIVE_AGENT_LABELS[activeAgentId] ?? 'Brain';
+
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5 min-h-[calc(100vh-4rem)]">
-      <div className="relative flex flex-col">
-        {/* Ambient wash behind the visualizer. */}
-        <div
+    <div className="fixed inset-0 bg-black overflow-hidden font-[Geist,Inter,system-ui]">
+      {/* Ambient orb-color wash so the rim of the screen subtly picks up
+         the speaker's identity. Sits below everything. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            effectivePalette === 'warm'
+              ? 'radial-gradient(ellipse at 50% 50%, rgba(255, 80, 130, 0.05), rgba(0,0,0,0) 65%)'
+              : 'radial-gradient(ellipse at 50% 50%, rgba(80, 180, 255, 0.05), rgba(0,0,0,0) 65%)',
+        }}
+      />
+
+      {/* Top-left: agent tag with state + name + elapsed time. */}
+      <div className="absolute top-6 left-6 z-20 flex items-center gap-2.5 text-[12px] font-medium text-white/55">
+        <span
           aria-hidden
-          className="pointer-events-none absolute inset-0"
-          style={{
-            background:
-              'radial-gradient(ellipse at 50% 40%, rgba(41, 216, 255, 0.05), rgba(7, 10, 15, 0) 60%)',
-          }}
+          className={cn(
+            'h-2 w-2 rounded-full',
+            realtime.state === 'listening' && 'bg-emerald-400',
+            realtime.state === 'thinking' && 'bg-amber-300 animate-pulse motion-reduce:animate-none',
+            realtime.state === 'speaking' && (effectivePalette === 'warm' ? 'bg-pink-400' : 'bg-cyan-300') + ' animate-pulse motion-reduce:animate-none',
+            realtime.state === 'connecting' && 'bg-amber-400 animate-pulse motion-reduce:animate-none',
+            (realtime.state === 'idle' || realtime.state === 'error') && 'bg-white/30',
+          )}
         />
+        <span className="tracking-wide">{speakingAgentName}</span>
+        <span className="opacity-30">·</span>
+        <span className="tracking-wide font-normal">{stateLabel(realtime.state)}</span>
+        {realtime.error ? (
+          <span className="ml-2 text-rose-400 font-normal">· {realtime.error}</span>
+        ) : null}
+      </div>
 
-        {/* Header — status, face toggle, error. */}
-        <div className="relative z-10 flex items-center justify-between px-1 py-2">
-          <div className="flex items-center gap-3 text-[var(--text-xs)] font-mono uppercase tracking-wider">
-            <span
-              aria-hidden
-              className={cn(
-                'h-2 w-2 rounded-full',
-                realtime.state === 'listening' && 'bg-emerald-400',
-                realtime.state === 'thinking' && 'bg-violet-400 animate-pulse motion-reduce:animate-none',
-                realtime.state === 'speaking' && 'bg-cyan-400 animate-pulse motion-reduce:animate-none',
-                realtime.state === 'connecting' && 'bg-amber-400 animate-pulse motion-reduce:animate-none',
-                (realtime.state === 'idle' || realtime.state === 'error') && 'bg-[var(--color-fg-subtle)]',
-              )}
-            />
-            <span className="text-[var(--color-fg-muted)]">{stateLabel(realtime.state)}</span>
-            {realtime.error ? (
-              <Badge tone="danger" size="sm">
-                {realtime.error}
-              </Badge>
-            ) : null}
-          </div>
-          <div className="flex items-center gap-2">
-            {realtime.state === 'speaking' ? (
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() => realtime.interrupt()}
-                title="Stop the current response (Esc)"
-              >
-                <Square size={12} aria-hidden />
-                Stop
-              </Button>
-            ) : null}
-            {realtime.state !== 'idle' && realtime.state !== 'error' ? (
-              <Button
-                size="sm"
-                variant={realtime.muted ? 'danger' : 'ghost'}
-                onClick={() => realtime.toggleMute()}
-                aria-pressed={realtime.muted}
-                title={
-                  realtime.muted
-                    ? 'Mic muted — click to unmute (⌘M)'
-                    : 'Mute mic (⌘M). AI stops listening.'
-                }
-              >
-                {realtime.muted ? <MicOff size={12} aria-hidden /> : <Mic size={12} aria-hidden />}
-                {realtime.muted ? 'Muted' : 'Mute'}
-              </Button>
-            ) : null}
-            <Button
-              size="sm"
-              variant={faceOn ? 'primary' : 'ghost'}
-              onClick={() => setFaceOn((v) => !v)}
-              aria-pressed={faceOn}
-              title="Show a humanoid face for the delegator (preview)"
-            >
-              <User2 size={12} aria-hidden />
-              Face
-            </Button>
-            {realtime.state === 'idle' || realtime.state === 'error' ? (
-              <Button size="sm" variant="primary" onClick={() => void realtime.start()}>
-                <Mic size={12} aria-hidden />
-                Connect
-              </Button>
-            ) : (
-              <Button size="sm" variant="ghost" onClick={() => realtime.stop()}>
-                <MicOff size={12} aria-hidden />
-                Disconnect
-              </Button>
-            )}
-          </div>
-        </div>
-
-        {/* Visualizer. */}
-        <div className="relative z-10 flex-1 min-h-[420px] grid place-items-center">
-          <div className="w-full max-w-[560px] aspect-square">
-            {faceOn ? (
-              <div className="w-full h-full grid place-items-center rounded-[var(--radius-lg)] bg-[var(--color-bg-surface)] border border-[var(--color-border-subtle)] text-center p-6">
-                <div>
-                  <p className="text-[var(--text-sm)] font-medium">Humanoid face preview</p>
-                  <p className="text-[var(--text-xs)] text-[var(--color-fg-muted)] mt-1">
-                    Streaming avatar is not wired up yet. Toggle off to return to the ethereal visualizer.
-                  </p>
-                  <button
-                    type="button"
-                    className="mt-3 text-[var(--text-xs)] text-[var(--color-accent)] underline"
-                    onClick={() => setFaceOn(false)}
-                  >
-                    Hide face
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <HumanoidVisualizer state={visualizerState} level={level} />
-            )}
-          </div>
-        </div>
-
-        {/* Last turn. */}
-        <div className="relative z-10 max-w-[720px] w-full mx-auto px-4 space-y-2">
-          {lastYou ? (
-            <p className="text-right text-[var(--text-sm)] text-[var(--color-fg-subtle)]">
-              <span className="font-mono text-[10px] uppercase tracking-wider mr-2">you</span>
-              {lastYou.text}
-            </p>
-          ) : null}
-          {lastDelegator ? (
-            <p className="text-[var(--text-base)] leading-relaxed text-[var(--color-fg-default)]">
-              {lastDelegator.text}
-            </p>
-          ) : null}
-        </div>
-
-        {/* Text composer — goes through the same delegator. */}
-        <form
-          onSubmit={onSubmitText}
-          className="relative z-10 mt-4 max-w-[720px] w-full mx-auto px-2 pb-2"
-        >
-          <div className="flex items-center gap-2">
-            <Input
-              placeholder="Type to the delegator — or just speak."
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              aria-label="Type to the delegator"
-            />
-            <Button type="submit" size="md" variant="primary" disabled={!textInput.trim()}>
-              <Send size={14} aria-hidden />
-              Send
-            </Button>
-          </div>
-          <p className="mt-1.5 text-[10px] text-[var(--color-fg-subtle)] font-mono uppercase tracking-wider">
-            The delegator picks the right specialist and hands off automatically.
-          </p>
-        </form>
-
-        {/* Micro-transcript (last few lines, scroll-less). */}
-        <div className="relative z-10 max-w-[720px] w-full mx-auto px-2 mt-2">
-          <Card className="p-2 max-h-[140px] overflow-y-auto">
-            <ul className="space-y-1 text-[var(--text-xs)]">
-              {transcript.slice(-6).map((entry) => (
-                <li key={entry.id} className="flex gap-2">
-                  <span className="font-mono uppercase tracking-wider w-16 flex-none text-[var(--color-fg-subtle)]">
-                    {entry.role === 'you'
-                      ? 'you'
-                      : entry.role === 'delegator'
-                        ? 'coord.'
-                        : entry.role === 'specialist'
-                          ? 'spec.'
-                          : 'sys'}
-                  </span>
-                  <span
-                    className={cn(
-                      'min-w-0',
-                      entry.role === 'system'
-                        ? 'text-[var(--color-fg-subtle)]'
-                        : 'text-[var(--color-fg-default)]',
-                    )}
-                  >
-                    {entry.text}
-                  </span>
-                </li>
-              ))}
-              {transcript.length === 0 ? (
-                <li className="text-[var(--color-fg-subtle)]">
-                  <X size={10} className="inline mr-1" aria-hidden />
-                  Waiting — start speaking or type a message.
-                </li>
-              ) : null}
-            </ul>
-          </Card>
+      {/* The orb — fills as much of the viewport as it can. */}
+      <div className="absolute inset-0 grid place-items-center z-0">
+        <div className="w-[min(86vmin,720px)] h-[min(86vmin,720px)]">
+          <HumanoidVisualizer state={visualizerState} level={level} palette={effectivePalette} />
         </div>
       </div>
 
-      {/* Right rail — team outputs. */}
-      <div className="h-full min-h-[600px]">
+      {/* Captions overlay — last user utterance + last AI reply. Floats over the orb at ~70% from top. */}
+      <div className="absolute left-1/2 top-[68%] -translate-x-1/2 z-10 max-w-[760px] w-[min(90vw,760px)] px-6 text-center pointer-events-none">
+        {lastYou ? (
+          <p className="text-[15px] leading-snug text-white/40 mb-3 font-normal">
+            "{lastYou.text}"
+          </p>
+        ) : null}
+        {lastDelegator ? (
+          <>
+            <p className="text-[10px] uppercase tracking-[0.18em] text-white/40 mb-2 font-medium">
+              {speakingAgentName}
+            </p>
+            <p className="text-[19px] leading-relaxed text-white/95 font-normal">
+              {lastDelegator.text}
+            </p>
+          </>
+        ) : null}
+        {!lastYou && !lastDelegator ? (
+          <p className="text-[14px] text-white/30">
+            {realtime.state === 'idle'
+              ? 'Press Connect to start.'
+              : realtime.state === 'connecting'
+                ? 'Connecting…'
+                : 'Listening.'}
+          </p>
+        ) : null}
+      </div>
+
+      {/* Bottom dock — controls. Always visible while connecting/idle so
+          first-run users see "Connect"; auto-hides during active call
+          unless cursor is near bottom. */}
+      <div
+        className={cn(
+          'absolute left-1/2 -translate-x-1/2 z-20',
+          'transition-all duration-200 ease-out',
+          isCallActive
+            ? 'bottom-8 opacity-50 hover:opacity-100 group'
+            : 'bottom-10 opacity-100',
+        )}
+      >
+        <div
+          className={cn(
+            'flex items-center gap-1 p-1.5',
+            'bg-white/[0.04] backdrop-blur-xl',
+            'border border-white/[0.08]',
+            'rounded-full',
+            'shadow-[0_8px_32px_rgba(0,0,0,0.4)]',
+          )}
+        >
+          {realtime.state === 'idle' || realtime.state === 'error' ? (
+            <button
+              type="button"
+              onClick={() => void realtime.start()}
+              className={cn(
+                'h-11 px-5 rounded-full',
+                'flex items-center gap-2',
+                'text-[13px] font-medium',
+                'bg-white text-black hover:bg-white/90',
+                'transition-colors duration-150',
+              )}
+            >
+              <Mic size={14} aria-hidden />
+              <span>Connect</span>
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => realtime.toggleMute()}
+                aria-pressed={realtime.muted}
+                title={realtime.muted ? 'Unmute (⌘M)' : 'Mute (⌘M)'}
+                className={cn(
+                  'h-11 w-11 rounded-full grid place-items-center',
+                  'transition-colors duration-150',
+                  realtime.muted
+                    ? 'bg-rose-500/20 text-rose-300 hover:bg-rose-500/30'
+                    : 'text-white/70 hover:text-white hover:bg-white/[0.06]',
+                )}
+              >
+                {realtime.muted ? <MicOff size={16} aria-hidden /> : <Mic size={16} aria-hidden />}
+              </button>
+              {realtime.state === 'speaking' ? (
+                <button
+                  type="button"
+                  onClick={() => realtime.interrupt()}
+                  title="Interrupt (Esc)"
+                  className={cn(
+                    'h-11 w-11 rounded-full grid place-items-center',
+                    'text-white/70 hover:text-white hover:bg-white/[0.06]',
+                    'transition-colors duration-150',
+                  )}
+                >
+                  <Square size={14} aria-hidden />
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => realtime.stop()}
+                title="End call"
+                className={cn(
+                  'h-11 px-5 rounded-full',
+                  'flex items-center gap-2',
+                  'text-[13px] font-medium',
+                  'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 hover:text-rose-200',
+                  'transition-colors duration-150',
+                )}
+              >
+                <X size={14} aria-hidden />
+                <span>End</span>
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Text composer — minimal, bottom-right, always available for typing
+          when voice isn't enough. Hidden when no call. */}
+      {isCallActive ? (
+        <form
+          onSubmit={onSubmitText}
+          className="absolute bottom-8 right-8 z-20 w-[min(360px,42vw)]"
+        >
+          <div
+            className={cn(
+              'flex items-center gap-1 px-1 pl-3',
+              'bg-white/[0.04] backdrop-blur-xl',
+              'border border-white/[0.08]',
+              'rounded-full',
+              'transition-all duration-150',
+              'focus-within:border-white/20 focus-within:bg-white/[0.06]',
+            )}
+          >
+            <input
+              type="text"
+              placeholder="Or type instead…"
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              aria-label="Type to the delegator"
+              className="flex-1 bg-transparent border-0 outline-none text-[13px] text-white/90 placeholder:text-white/30 py-2.5"
+            />
+            <button
+              type="submit"
+              disabled={!textInput.trim()}
+              className={cn(
+                'h-9 w-9 rounded-full grid place-items-center',
+                'text-white/60 hover:text-white hover:bg-white/[0.06]',
+                'disabled:text-white/20 disabled:hover:bg-transparent',
+                'transition-colors duration-150',
+              )}
+            >
+              <Send size={14} aria-hidden />
+            </button>
+          </div>
+        </form>
+      ) : null}
+      {/* Hide-from-eyes-but-keep-the-logic — face/handoff/briefings still
+         tracked but not rendered in Voice Stage; they live on the
+         right-rail in the future Admin Mode redesign. */}
+      <div className="hidden">
+        <span>{faceOn ? 'face' : ''}</span>
         <OutputsRail
           artifacts={handoff.artifacts}
           onDismiss={handoff.dismissArtifact}

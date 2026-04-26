@@ -91,10 +91,50 @@ export function AppShell({
   const setMode = (mode: AppearanceMode) => onAppearanceChange({ mode });
   const setEffects = (effects: EffectLayer) => onAppearanceChange({ effects });
 
+  // Voice Stage Mode: when the user is in the voice workspace, render the
+  // children full-bleed with no sidebar or top bar. The visualizer becomes
+  // the entire screen (per Option D's "Voice Stage" paradigm). A small
+  // floating "admin" escape sits in the top-right so the operator can
+  // step out into the chrome'd workspaces without typing a hotkey.
+  if (workspace === 'voice') {
+    return (
+      <TooltipProvider delayDuration={200}>
+        <div
+          data-slot="shell"
+          data-mode="voice-stage"
+          className="min-h-screen text-[var(--color-fg-default)] bg-black relative"
+        >
+          {children}
+          {/* Floating admin-mode escape. Top-right corner. Subtle. */}
+          <button
+            type="button"
+            onClick={() => onWorkspaceChange('control')}
+            aria-label="Open admin (Mission Control)"
+            className={cn(
+              'fixed top-4 right-4 z-50 group',
+              'h-9 px-3 rounded-full',
+              'flex items-center gap-2',
+              'bg-white/[0.04] hover:bg-white/[0.10]',
+              'border border-white/[0.06] hover:border-white/[0.14]',
+              'backdrop-blur-md',
+              'text-[11px] font-medium tracking-wide uppercase',
+              'text-white/40 hover:text-white/90',
+              'transition-all duration-150 ease-out',
+            )}
+          >
+            <LayoutGrid size={13} aria-hidden className="opacity-70 group-hover:opacity-100" />
+            <span>Admin</span>
+          </button>
+        </div>
+      </TooltipProvider>
+    );
+  }
+
   return (
     <TooltipProvider delayDuration={200}>
       <div
         data-slot="shell"
+        data-mode="admin"
         className="min-h-screen flex text-[var(--color-fg-default)] bg-[var(--color-bg-canvas)]"
       >
         <aside
