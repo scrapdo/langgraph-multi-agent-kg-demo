@@ -1,17 +1,47 @@
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, Callable
+
+from app.core.config import settings
 
 
-class InMemoryRunStore:
-    def __init__(self) -> None:
-        self._data: dict[str, dict[str, Any]] = {}
+def _utc_now() -> str:
+    return datetime.now(tz=timezone.utc).isoformat()
+
+
+class JsonRunStore:
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
         self._lock = Lock()
+        self._data: dict[str, dict[str, Any]] = {}
+
+    def _reload(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            try:
+                raw = json.loads(self.path.read_text())
+                if isinstance(raw, dict):
+                    self._data = raw
+                else:
+                    self._data = {}
+            except Exception:
+                self._data = {}
+        else:
+            self._data = {}
+
+    def _flush(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(".tmp")
+        tmp_path.write_text(json.dumps(self._data, indent=2, sort_keys=True))
+        tmp_path.replace(self.path)
 
     def create(self, run_id: str, task: str, mode: str) -> dict[str, Any]:
-        now = datetime.now(tz=timezone.utc)
+        now = _utc_now()
         record = {
             "run_id": run_id,
             "status": "queued",
@@ -23,18 +53,45 @@ class InMemoryRunStore:
             "updated_at": now,
         }
         with self._lock:
+            self._reload()
             self._data[run_id] = record
-        return record
+            self._flush()
+            return deepcopy(record)
 
     def update(self, run_id: str, **updates: Any) -> dict[str, Any]:
         with self._lock:
+            self._reload()
             rec = self._data[run_id]
             rec.update(updates)
-            rec["updated_at"] = datetime.now(tz=timezone.utc)
-            return rec
+            rec["updated_at"] = _utc_now()
+            self._flush()
+            return deepcopy(rec)
 
     def get(self, run_id: str) -> dict[str, Any] | None:
-        return self._data.get(run_id)
+        with self._lock:
+            self._reload()
+            rec = self._data.get(run_id)
+            return deepcopy(rec) if rec else None
+
+    def update_state(self, run_id: str, transform: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+        with self._lock:
+            self._reload()
+            rec = self._data[run_id]
+            state = deepcopy(rec.get("state") or {})
+            new_state = transform(state) or state
+            rec["state"] = new_state
+            rec["updated_at"] = _utc_now()
+            self._flush()
+            return deepcopy(rec)
+
+    def list(self, limit: int | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            self._reload()
+            rows = list(self._data.values())
+            rows.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+            if limit is not None:
+                rows = rows[:limit]
+            return deepcopy(rows)
 
 
-run_store = InMemoryRunStore()
+run_store = JsonRunStore(settings.run_store_path)

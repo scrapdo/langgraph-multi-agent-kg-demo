@@ -2,11 +2,33 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>KG Multi-Agent Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0a0d12" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="The Brain" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>The Brain</title>
   </head>
   <body>
     <div id="root"></div>
+    <!--
+      Runtime backend URL bridge. The native app may bind a non-default
+      port (e.g. 8001 when Docker holds 8000) and pass the resolved URL
+      via `?api_base=...`. We promote it to a window global before the
+      React bundle loads so each module's API_BASE constant picks it up
+      at module init. No-op in browser dev mode where the param is absent.
+    -->
+    <script>
+      (function () {
+        try {
+          var p = new URLSearchParams(window.location.search).get('api_base');
+          if (p) window.__BRAIN_API_BASE__ = p;
+        } catch (_) {}
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

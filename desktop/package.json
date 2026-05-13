@@ -1,0 +1,72 @@
+{
+  "name": "kg-multi-agent-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.js",
+  "description": "Native (Docker-free) desktop app for the Brain.",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build:web": "cd ../frontend && npm install && npm run build",
+    "build:backend": "cd ../backend && .venv-native/bin/pyinstaller brain_backend.spec --noconfirm",
+    "prepackage": "npm run build:web && npm run build:backend",
+    "dist": "npm run prepackage && electron-builder --mac --dir",
+    "dmg": "npm run prepackage && electron-builder --mac dmg",
+    "dmg:signed": "npm run prepackage && electron-builder --mac dmg --publish never",
+    "icon:noop": "echo 'add desktop/build/icon.icns for a proper app icon'"
+  },
+  "build": {
+    "appId": "com.langgraph.brain",
+    "productName": "The Brain",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "launcher.js",
+      "preload.js",
+      "splash.html",
+      "wizard.html",
+      "composer.html",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../backend/dist/brain_backend",
+        "to": "brain_backend",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../frontend/dist",
+        "to": "frontend",
+        "filter": ["**/*"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": "dmg",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "artifactName": "${productName}.${ext}",
+      "notarize": false
+    },
+    "dmg": {
+      "title": "${productName}",
+      "contents": [
+        { "x": 150, "y": 220, "type": "file" },
+        { "x": 420, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "afterSign": "build/notarize.js"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^31.7.7",
+    "electron-builder": "^26.8.1",
+    "wait-on": "^8.0.1"
+  }
+}

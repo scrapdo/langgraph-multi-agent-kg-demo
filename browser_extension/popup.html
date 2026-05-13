@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ask my brain</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 14px;
+        font-family: -apple-system, 'Inter', system-ui, sans-serif;
+        background: #10151d;
+        color: #e8edf4;
+      }
+      h1 {
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        margin: 0 0 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .dot {
+        width: 8px; height: 8px; border-radius: 999px;
+        background: #29d8ff; box-shadow: 0 0 0 4px rgba(41,216,255,0.2);
+      }
+      p.hint { font-size: 11px; color: #9aa7b8; margin: 0 0 10px; line-height: 1.4; }
+      textarea {
+        width: 100%;
+        min-height: 60px;
+        resize: vertical;
+        font: inherit;
+        font-size: 13px;
+        color: #e8edf4;
+        background: #070a0f;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        padding: 8px 10px;
+        outline: none;
+      }
+      textarea:focus { border-color: rgba(41,216,255,0.4); }
+      button.primary {
+        margin-top: 10px;
+        width: 100%;
+        height: 34px;
+        font: inherit;
+        font-weight: 600;
+        font-size: 13px;
+        color: #041014;
+        background: #29d8ff;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      button.primary:hover { background: #6be5ff; }
+      button.secondary {
+        margin-top: 6px;
+        width: 100%;
+        height: 28px;
+        font: inherit;
+        font-size: 11px;
+        color: #9aa7b8;
+        background: transparent;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      button.secondary:hover { color: #e8edf4; }
+      .row { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-top: 12px; }
+      input[type="text"] {
+        font: inherit; font-size: 11px;
+        color: #e8edf4; background: #070a0f;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 6px; padding: 6px 8px; outline: none;
+      }
+      #status { margin-top: 10px; font-size: 11px; color: #9aa7b8; min-height: 14px; }
+      #status.ok { color: #34d399; }
+      #status.err { color: #fda4af; }
+    </style>
+  </head>
+  <body>
+    <h1><span class="dot"></span> Ask my brain</h1>
+    <p class="hint">Sends this tab's URL, title, and any selected text. Optionally include a specific question.</p>
+    <textarea id="question" placeholder="Optional question about this page…"></textarea>
+    <button class="primary" id="send">Send to brain</button>
+    <button class="secondary" id="send-empty">Summarise this page</button>
+    <div id="status"></div>
+
+    <div class="row" title="Change if your brain runs on a different host">
+      <input type="text" id="api-base" placeholder="http://127.0.0.1:8000" />
+      <button class="secondary" id="save-api" style="width: 60px; margin-top: 0;">Save</button>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

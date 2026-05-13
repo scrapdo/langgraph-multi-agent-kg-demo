@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Starting LangGraph Brain…</title>
+    <style>
+      :root {
+        --bg: #0a0d12;
+        --surface: #10151d;
+        --fg: #e8edf4;
+        --muted: #9aa7b8;
+        --accent: #29d8ff;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-accent: rgba(41, 216, 255, 0.4);
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 14% -12%, rgba(41, 216, 255, 0.2), transparent 40%),
+          radial-gradient(circle at 85% -5%, rgba(155, 140, 255, 0.15), transparent 34%),
+          var(--bg);
+        color: var(--fg);
+        font-family: 'Inter', 'SFProDisplay-Regular', 'Helvetica Neue', sans-serif;
+        display: grid;
+        place-items: center;
+        -webkit-app-region: drag;
+        user-select: none;
+      }
+      .card {
+        width: min(88vw, 440px);
+        padding: 28px 32px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: 0 18px 44px rgba(0, 0, 0, 0.5);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 18px;
+      }
+      .brand-mark {
+        width: 28px; height: 28px;
+        border-radius: 8px;
+        background: rgba(41, 216, 255, 0.14);
+        border: 1px solid var(--border-accent);
+        display: grid; place-items: center;
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .brand-name {
+        font-size: 13px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      h1 {
+        margin: 0 0 6px;
+        font-size: 20px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      p.status {
+        margin: 0 0 20px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+        min-height: 42px;
+      }
+      .steps {
+        list-style: none;
+        padding: 0;
+        margin: 0 0 18px;
+        display: grid;
+        gap: 8px;
+        font-size: 13px;
+      }
+      .steps li {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+      }
+      .steps li.done { color: var(--fg); }
+      .steps li.active { color: var(--accent); }
+      .dot {
+        width: 8px; height: 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.18);
+        flex-shrink: 0;
+      }
+      .steps li.done .dot { background: #34d399; }
+      .steps li.active .dot {
+        background: var(--accent);
+        box-shadow: 0 0 0 4px rgba(41, 216, 255, 0.22);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.4); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .steps li.active .dot { animation: none; }
+      }
+      .progress-track {
+        height: 3px;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .progress-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, rgba(41,216,255,0.2), var(--accent));
+        transition: width 200ms ease;
+      }
+      .hint {
+        margin-top: 14px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.45);
+      }
+      .error {
+        margin-top: 10px;
+        padding: 10px 12px;
+        background: rgba(251, 113, 133, 0.1);
+        border: 1px solid rgba(251, 113, 133, 0.3);
+        border-radius: 8px;
+        color: #fda4af;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        display: none;
+      }
+      .error.visible { display: block; }
+    </style>
+  </head>
+  <body>
+    <main class="card" role="status" aria-live="polite">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden>KG</div>
+        <span class="brand-name">LangGraph Brain</span>
+      </div>
+      <h1>Starting your services</h1>
+      <p class="status" id="status">Preparing the local stack…</p>
+      <ul class="steps" id="steps">
+        <li id="step-docker"><span class="dot"></span>Checking Docker</li>
+        <li id="step-compose"><span class="dot"></span>Starting backend services</li>
+        <li id="step-health"><span class="dot"></span>Waiting for API to become healthy</li>
+        <li id="step-ready"><span class="dot"></span>Loading the console</li>
+      </ul>
+      <div class="progress-track" aria-hidden>
+        <div class="progress-bar" id="bar"></div>
+      </div>
+      <p class="hint">Close this window to stop the backend services.</p>
+      <div class="error" id="error"></div>
+    </main>
+    <script>
+      // Listen for status updates from the Electron main process via the preload bridge.
+      if (window.desktop && typeof window.desktop.onStartupEvent === 'function') {
+        window.desktop.onStartupEvent((evt) => {
+          const { phase, message, progress, error } = evt || {};
+          const statusEl = document.getElementById('status');
+          const barEl = document.getElementById('bar');
+          const errorEl = document.getElementById('error');
+          if (message) statusEl.textContent = message;
+          if (typeof progress === 'number') barEl.style.width = progress + '%';
+          const steps = { docker: 'step-docker', compose: 'step-compose', health: 'step-health', ready: 'step-ready' };
+          const order = ['docker', 'compose', 'health', 'ready'];
+          const activeIdx = order.indexOf(phase);
+          order.forEach((key, idx) => {
+            const li = document.getElementById(steps[key]);
+            if (!li) return;
+            li.classList.remove('done', 'active');
+            if (idx < activeIdx) li.classList.add('done');
+            else if (idx === activeIdx) li.classList.add('active');
+          });
+          if (error) {
+            errorEl.textContent = error;
+            errorEl.classList.add('visible');
+          } else {
+            errorEl.classList.remove('visible');
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

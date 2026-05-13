@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Ask My Brain",
+  "short_name": "Brain",
+  "version": "0.1.0",
+  "description": "Send the current page (or selection) to your local Brain and get a notification when the run completes.",
+  "permissions": ["activeTab", "scripting", "storage", "notifications"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_title": "Ask my brain about this page",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.svg",
+      "32": "icon.svg",
+      "48": "icon.svg",
+      "128": "icon.svg"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icon.svg",
+    "32": "icon.svg",
+    "48": "icon.svg",
+    "128": "icon.svg"
+  },
+  "commands": {
+    "ask-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+B",
+        "mac": "Command+Shift+B"
+      },
+      "description": "Send the current tab to the brain"
+    }
+  }
+}

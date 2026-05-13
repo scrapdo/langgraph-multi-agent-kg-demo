@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:;" />
+    <title>Ask the brain</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        font-family: 'Inter', 'SF Pro Display', 'Helvetica Neue', sans-serif;
+        background: rgba(16, 21, 29, 0.96);
+        color: #e8edf4;
+        -webkit-font-smoothing: antialiased;
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      main {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        height: 100%;
+        padding: 10px 14px;
+        gap: 8px;
+        -webkit-app-region: drag;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #9aa7b8;
+        font-size: 11px;
+        letter-spacing: 0.04em;
+      }
+      .dot {
+        width: 8px; height: 8px; border-radius: 999px;
+        background: #29d8ff;
+        box-shadow: 0 0 0 4px rgba(41, 216, 255, 0.18);
+      }
+      input, button, textarea { font: inherit; }
+      textarea {
+        -webkit-app-region: no-drag;
+        resize: none;
+        flex: 1;
+        min-height: 36px;
+        background: rgba(7, 10, 15, 0.8);
+        color: #e8edf4;
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+        outline: none;
+      }
+      textarea:focus {
+        border-color: rgba(41, 216, 255, 0.4);
+        box-shadow: 0 0 0 2px rgba(41, 216, 255, 0.25);
+      }
+      footer {
+        -webkit-app-region: no-drag;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        color: #6b7789;
+        font-size: 11px;
+      }
+      .hint { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+      .status { color: #9aa7b8; }
+      .status.error { color: #fda4af; }
+      .status.success { color: #34d399; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="dot" id="dot" aria-hidden></span>
+        <span class="hint">The Brain</span>
+        <span id="status" class="status">Ready — type and hit Enter</span>
+      </header>
+      <textarea id="input" autofocus placeholder="Ask the brain a question…"></textarea>
+      <footer>
+        <span class="hint">⇧↵ newline · ↵ send · esc close</span>
+        <span class="hint" id="sent"></span>
+      </footer>
+    </main>
+    <script>
+      const API = 'http://127.0.0.1:8000';
+      const input = document.getElementById('input');
+      const status = document.getElementById('status');
+      const sent = document.getElementById('sent');
+
+      function setStatus(text, variant) {
+        status.textContent = text;
+        status.className = 'status' + (variant ? ' ' + variant : '');
+      }
+
+      async function submit() {
+        const text = input.value.trim();
+        if (!text) return;
+        setStatus('Dispatching…');
+        input.disabled = true;
+        try {
+          const res = await fetch(API + '/runs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task: text, mode: 'live' }),
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const json = await res.json();
+          sent.textContent = 'run ' + String(json.run_id || '').slice(0, 8);
+          if (window.composer && window.composer.trackRun) {
+            window.composer.trackRun(String(json.run_id));
+          }
+          setStatus('Sent — notifying on finish', 'success');
+          input.value = '';
+          setTimeout(() => {
+            if (window.composer && window.composer.hide) window.composer.hide();
+          }, 350);
+        } catch (err) {
+          setStatus(err && err.message ? err.message : 'Failed to reach the API', 'error');
+        } finally {
+          input.disabled = false;
+          input.focus();
+        }
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+          e.preventDefault();
+          submit();
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          if (window.composer && window.composer.hide) window.composer.hide();
+        }
+      });
+
+      // Auto-focus when the window shows.
+      window.addEventListener('focus', () => input.focus());
+    </script>
+  </body>
+</html>
