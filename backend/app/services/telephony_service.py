@@ -14,7 +14,7 @@ Flow for a single call:
      session.update with the Secretary's instructions + g711_ulaw formats.
   4. Two async pumps run in parallel:
        - twilio → openai: extract media.payload, send as input_audio_buffer.append
-       - openai → twilio: for each response.audio.delta, send {event: "media"} with the delta
+       - openai → twilio: for each response.output_audio.delta, send {event: "media"} with the delta
   5. On hangup Twilio sends {event: "stop"} or closes the WebSocket; we close
      the OpenAI side too.
 
@@ -88,7 +88,10 @@ You cannot send texts or emails during this call. For those, take a message and 
 """
 
 
-OPENAI_REALTIME_WS = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
+# GA Realtime model (May 2026 migration). The preview model
+# `gpt-4o-realtime-preview` and the `OpenAI-Beta: realtime=v1` header both
+# deprecate on May 18, 2026, so we connect to `gpt-realtime` with no beta header.
+OPENAI_REALTIME_WS = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
 
 
 def _today_human_string() -> str:
@@ -223,12 +226,17 @@ class _CallBridge:
         self.closed = asyncio.Event()
 
     async def _connect_openai(self) -> None:
-        """Open the OpenAI Realtime WebSocket and send the initial session config."""
+        """Open the OpenAI Realtime WebSocket and send the initial session config.
+
+        Uses the GA Realtime schema (May 2026): no beta header, nested
+        ``audio.input`` / ``audio.output`` config, MIME-typed format objects
+        (audio/pcmu for telephony — Twilio's mulaw passes through directly to
+        OpenAI's pcmu codec with no transcoding).
+        """
         import websockets
 
         headers = [
             ("Authorization", f"Bearer {settings.openai_api_key}"),
-            ("OpenAI-Beta", "realtime=v1"),
         ]
         self.openai_ws = await websockets.connect(
             OPENAI_REALTIME_WS,
@@ -239,25 +247,31 @@ class _CallBridge:
         session_config: dict[str, Any] = {
             "type": "session.update",
             "session": {
-                "modalities": ["audio", "text"],
+                "type": "realtime",
                 "instructions": self._instructions(),
-                # Twilio sends mulaw/8000. OpenAI accepts "g711_ulaw" directly, so
-                # we round-trip base64 audio with zero transcoding.
-                "input_audio_format": "g711_ulaw",
-                "output_audio_format": "g711_ulaw",
-                "voice": (settings.openai_realtime_secretary_voice or "shimmer"),
-                "input_audio_transcription": {"model": "whisper-1"},
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700,
-                    "interrupt_response": True,
+                "output_modalities": ["audio"],
+                "audio": {
+                    "input": {
+                        # Twilio sends mulaw/8000. pcmu IS mulaw — pass through
+                        # base64 frames with zero transcoding.
+                        "format": {"type": "audio/pcmu"},
+                        "transcription": {"model": "whisper-1"},
+                        "turn_detection": {
+                            "type": "server_vad",
+                            "threshold": 0.5,
+                            "prefix_padding_ms": 300,
+                            "silence_duration_ms": 700,
+                            "interrupt_response": True,
+                        },
+                    },
+                    "output": {
+                        "format": {"type": "audio/pcmu"},
+                        "voice": (settings.openai_realtime_secretary_voice or "shimmer"),
+                    },
                 },
-                "temperature": 0.7,
-                # Tools the secretary can call mid-call. Read-only — no mutating
-                # actions during a live phone conversation (too risky to mishear
-                # a date/phone/amount and fire it).
+                # Tools the secretary can call mid-call. Read tools are
+                # immediate; calendar_create requires a verbal confirmation
+                # gate (enforced by SECRETARY_PHONE_INSTRUCTIONS).
                 "tools": _phone_tools(),
                 "tool_choice": "auto",
             },
@@ -274,11 +288,14 @@ class _CallBridge:
             if self.direction == "inbound"
             else "Greet the callee as Emma, Matt's assistant, calling on his behalf, and briefly state the reason. Keep it to one sentence and include your name."
         )
+        # GA Realtime renamed response.create's `modalities` → `output_modalities`.
+        # The bare server name `text` is dropped too (it's implicit; only audio
+        # needs to be requested explicitly).
         await self.openai_ws.send(
             json.dumps(
                 {
                     "type": "response.create",
-                    "response": {"modalities": ["audio", "text"], "instructions": greeting},
+                    "response": {"output_modalities": ["audio"], "instructions": greeting},
                 }
             )
         )
@@ -343,7 +360,7 @@ class _CallBridge:
             self.closed.set()
 
     async def _openai_to_twilio(self) -> None:
-        """Pump OpenAI response.audio.delta → Twilio media frames."""
+        """Pump OpenAI response.output_audio.delta → Twilio media frames."""
         audio_deltas = 0
         try:
             while not self.closed.is_set():
@@ -353,7 +370,12 @@ class _CallBridge:
                 raw = await self.openai_ws.recv()
                 msg = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
                 mtype = msg.get("type", "")
-                if mtype == "response.audio.delta":
+                # GA Realtime renamed audio events:
+                #   response.audio.delta            → response.output_audio.delta
+                #   response.audio_transcript.done  → response.output_audio_transcript.done
+                # Accept the new names; the old names stop working when the
+                # gpt-4o-realtime-preview model is retired on May 18, 2026.
+                if mtype in ("response.output_audio.delta", "response.audio.delta"):
                     delta = msg.get("delta")
                     if delta and self.stream_sid:
                         audio_deltas += 1
@@ -416,7 +438,7 @@ class _CallBridge:
                     # Surfaced so we can see the model actually processing. Volume is fine;
                     # a typical call only fires 10-30 of these total.
                     logger.info("telephony_openai_event", extra={"type": mtype})
-                elif mtype == "response.audio_transcript.done":
+                elif mtype in ("response.output_audio_transcript.done", "response.audio_transcript.done"):
                     transcript = str(msg.get("transcript") or "")[:160]
                     logger.info("telephony_assistant_said", extra={"transcript": transcript})
                 elif mtype == "conversation.item.input_audio_transcription.completed":

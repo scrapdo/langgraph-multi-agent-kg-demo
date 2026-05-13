@@ -70,6 +70,12 @@ Personality:
 TOOL-CALLING DISCIPLINE — read carefully:
 - When you decide to call ANY tool (quick_lookup, route_to_specialist, control_app, schedule_proactive, list_proactive, cancel_proactive, secretary_place_call), call it SILENTLY. Do NOT speak before the tool call. Do NOT say "let me check", "one moment", "looking that up", or give a placeholder general-knowledge answer. Your first output in that turn IS the tool call, nothing more. EXCEPTION: destructive or live-side-effect actions (sending messages/email/calls, creating calendar events) require a confirmation gate — in those cases speak the confirmation readback first, wait for the operator's explicit yes, THEN call the tool silently.
 - After the tool result comes back, speak the actual answer. Do not narrate the tool you used.
+- TOOL FAILURES: when a tool result has `status: 'error'` it includes a `kind` and may include `remediation` / `remediation_url`. Don't say "couldn't do that" — read the failure shape:
+  - `kind: 'auth_required'` → "I can't see your calendar yet — you'll need to connect Google in Settings first." Use the `remediation` field as your script.
+  - `kind: 'rate_limited'` → "That hit a rate limit. Try again in a minute."
+  - `kind: 'permission_denied'` → "Looks like macOS permissions are blocking that. Check Automation in System Settings."
+  - `kind: 'execution_failed'` (or no kind) → read the `error` string back as a short spoken sentence.
+  Always tell the operator the actionable thing — what they can do — not just that the tool failed.
 - Exception: for route_to_specialist only, you may say ONE short handoff line ("Researcher's on it.") before the tool call — never more than one sentence, and never a generic placeholder answer.
 
 ALWAYS ANSWER DIRECTLY (do NOT call any tool) when the operator asks about:
@@ -128,6 +134,14 @@ After the operator confirms, call the tool with ALL required fields in a single 
 If the operator hesitates, says "wait", "no", or gives a partial/unclear answer, DO NOT call the tool. Ask a clarifying question.
 
 SCHEDULE PROACTIVE TASKS when the operator asks for something recurring — "every morning at 8am give me X", "daily at 6 tell me Y", "every Monday summarize Z". Call `schedule_proactive` with a clear name, a standalone prompt, local time (hour/minute), and the weekdays. For "daily" use all seven. To cancel, use `cancel_proactive` — but confirm the specific task name before calling.
+
+SCHEDULE ONE-OFF BACKGROUND TASKS via `schedule_task` when the operator says "look into X and have it ready by tomorrow", "research Y and tell me when I'm back", "draft Z while I'm in the meeting", or anything else that's a single deliverable they don't need RIGHT NOW. The task runs immediately on a background thread; the result lands in your inbox and you'll see it as a "PENDING DELIVERIES" block in the system prompt at the start of the NEXT voice session. When you see that block, surface those items naturally at the top of the conversation ("by the way, that research on X you asked for — here's what I found"). Don't wait for the operator to ask. After you've surfaced them, they're considered delivered.
+
+When the operator says "what did you find on X?" or "did that thing finish?", trust the PENDING DELIVERIES block — it's the freshest source. If they ask about something not in the block, say so honestly.
+
+CREATE DOCUMENTS via `create_document` when the operator asks for a "one-pager", "writeup", "doc", "PDF", "summary I can share", "visual aid", or any other tangible artifact. The document opens in their browser; from there they can Cmd+P → Save as PDF if they want a file. Use clean Markdown — headings, bullets, tables, code fences as appropriate. Aim for a single page of substance unless they ask for length. Confirm the title silently from context (don't ask "what should I call it?" if the topic is obvious).
+
+DO NOT READ THE DOCUMENT ALOUD. After `create_document` returns, give a short spoken confirmation ONLY — one sentence, like "Done — I opened it in your browser" or "Made you the one-pager — it's up." Do NOT recite the title back, do NOT summarize the content, do NOT enumerate sections. If the operator asks "what's in it?" or "read it to me", THEN walk them through it. Default behavior is the visual artifact does the talking.
 
 VERIFYING PROACTIVE RESULTS (your accountability loop):
 When the operator asks about a recurring task — "did my morning brief run?", "what's in my jobs report?", "why didn't I get my news today?" — you MUST call `list_proactive` before answering. Never guess or assume a scheduled task completed.
@@ -545,6 +559,77 @@ def build_delegator_tools() -> list[dict[str, Any]]:
                 "required": ["title", "start_iso", "end_iso"],
             },
         },
+        # One-shot background task ("ask now, deliver later").
+        {
+            "type": "function",
+            "name": "schedule_task",
+            "description": (
+                "Kick off a one-shot background task and return immediately. "
+                "Use when the operator asks for a deliverable they don't need "
+                "RIGHT NOW — research, drafts, summaries, anything that benefits "
+                "from running while they're away. The result will be surfaced "
+                "automatically at the start of the next voice session. Don't use "
+                "this for things they want to hear NOW (just answer directly), "
+                "and don't use it for recurring asks (use schedule_proactive)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Short descriptive label, 1-6 words. e.g. 'Research EV "
+                            "tax credits'. Used to identify the task in the inbox."
+                        ),
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Standalone first-person instruction the workflow will "
+                            "act on without further clarification. Rewrite the "
+                            "operator's request into a complete task — include any "
+                            "context the team needs to do the work."
+                        ),
+                    },
+                },
+                "required": ["name", "prompt"],
+            },
+        },
+        # Document generation — markdown to a styled HTML page that opens in
+        # the operator's default browser. PDF is one Cmd+P away from there.
+        {
+            "type": "function",
+            "name": "create_document",
+            "description": (
+                "Render a Markdown document as a styled HTML page and open it in "
+                "the operator's default browser. Use for one-pagers, writeups, "
+                "summaries, plans, lists they want to share or print to PDF. The "
+                "operator can Cmd+P → Save as PDF for an actual PDF file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": (
+                            "Document title shown at the top of the page. Pick a "
+                            "concrete name from context — don't ask the operator "
+                            "if the topic is obvious."
+                        ),
+                    },
+                    "content_md": {
+                        "type": "string",
+                        "description": (
+                            "Document body as Markdown. Use headings, bullets, "
+                            "tables, blockquotes, and code fences as appropriate. "
+                            "Default to a single page of substance unless the "
+                            "operator asks for more length."
+                        ),
+                    },
+                },
+                "required": ["title", "content_md"],
+            },
+        },
     ]
 
 
@@ -553,6 +638,8 @@ def build_realtime_session_payload(
     voice: str,
     *,
     operator_profile: str = "",
+    memory_context: str = "",
+    inbox_brief: str = "",
 ) -> dict[str, Any]:
     """Assemble the JSON body for POST /v1/realtime/sessions.
 
@@ -562,6 +649,15 @@ def build_realtime_session_payload(
     asking "which location?" when it already knows the operator is in Baltimore.
     The delegator is the one place personalization is safe: specialist runs
     still skip the profile to avoid it leaking into written outputs.
+
+    `memory_context` is a Zep-rendered summary of the operator's rolling voice
+    thread — what was discussed over the last days/weeks. Brain reads it
+    silently and uses it to be continuous ("yesterday you mentioned..." rather
+    than "what did we talk about?").
+
+    `inbox_brief` is a short list of completed background tasks that haven't
+    yet been delivered to the operator. Brain announces them at the top of
+    the session so "ask now, deliver later" works naturally.
     """
     instructions = DELEGATOR_INSTRUCTIONS
     if operator_profile.strip():
@@ -573,24 +669,56 @@ def build_realtime_session_payload(
             "their location; 'what's on TV tonight?' → use their timezone):\n"
             f"{operator_profile.strip()}"
         )
+    if memory_context.strip():
+        instructions += (
+            "\n\n"
+            "RECENT CONVERSATION CONTEXT (from your rolling voice thread — what you "
+            "and the operator have been discussing recently). Use this silently for "
+            "continuity. Don't recite it; just be aware of it:\n"
+            f"{memory_context.strip()}"
+        )
+    if inbox_brief.strip():
+        instructions += (
+            "\n\n"
+            "PENDING DELIVERIES — background tasks the operator asked for earlier "
+            "have completed since you last spoke. At the START of this conversation, "
+            "after greeting them, naturally surface these results. Read each one in "
+            "your own words — don't quote a script. After surfacing them they're "
+            "considered delivered; do not bring them up again unprompted next time.\n"
+            f"{inbox_brief.strip()}"
+        )
+    # GA Realtime API body shape (May 2026). The legacy POST /v1/realtime/sessions
+    # endpoint with a flat body (modalities, voice, input_audio_format, etc.) is
+    # deprecated on May 18, 2026. The replacement POST /v1/realtime/client_secrets
+    # wraps everything in a `session` object with the new nested audio schema.
     return {
-        "model": model,
-        "voice": voice,
-        "instructions": instructions,
-        "tools": build_delegator_tools(),
-        "tool_choice": "auto",
-        "modalities": ["audio", "text"],
-        "input_audio_format": "pcm16",
-        "output_audio_format": "pcm16",
-        "input_audio_transcription": {"model": "whisper-1"},
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": 0.5,
-            "prefix_padding_ms": 300,
-            "silence_duration_ms": 500,
-            # When the operator starts speaking while the AI is mid-
-            # response, server VAD will cancel the response. Without this,
-            # the AI keeps talking over the user.
-            "interrupt_response": True,
+        "session": {
+            "type": "realtime",
+            "model": model,
+            "instructions": instructions,
+            "tools": build_delegator_tools(),
+            "tool_choice": "auto",
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    # pcm16 → audio/pcm @ 24kHz under the new MIME-typed format object.
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "transcription": {"model": "whisper-1"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500,
+                        # When the operator starts speaking while the AI is mid-
+                        # response, server VAD cancels the response. Without
+                        # this, the AI talks over the user.
+                        "interrupt_response": True,
+                    },
+                },
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "voice": voice,
+                },
+            },
         },
     }

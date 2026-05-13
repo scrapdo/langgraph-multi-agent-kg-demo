@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Generator
 from uuid import uuid4
 
@@ -648,11 +650,65 @@ async def app_control(payload: dict) -> dict:
                 "error": str(exc),
             },
         )
+        # Structured error: classify the failure so the agent can tell the
+        # operator what went wrong AND what to do about it. Without this,
+        # every tool failure surfaces as a generic "couldn't do that" — the
+        # operator has to ask "why?" and dig through logs themselves.
         raise HTTPException(
             status_code=400,
-            detail=f"{exc} (received arg keys: {sorted(merged_args.keys())})",
+            detail=_classify_app_control_error(str(exc), app_name, action),
         ) from exc
     return {"ok": True, "app": app_name, "action": action, "result": result}
+
+
+def _classify_app_control_error(
+    message: str, app_name: str, action: str
+) -> dict[str, Any]:
+    """Map an AppControlError message into a structured payload the agent
+    can read aloud. Buckets:
+
+      - auth_required: OAuth not connected (Google Workspace, etc.). Has
+        a remediation_url the operator can be pointed to.
+      - rate_limited: upstream throttling — the agent should suggest
+        waiting and retrying.
+      - permission_denied: macOS automation permissions, host-bridge token
+        missing. The agent should mention enabling permissions in Settings.
+      - execution_failed: catch-all for everything else. The agent reads
+        the detail verbatim — it's usually the underlying tool's own
+        error message which is good enough.
+    """
+    lower = message.lower()
+    if "not connected" in lower or "oauth" in lower or "auth" in lower:
+        return {
+            "kind": "auth_required",
+            "detail": message,
+            "app": app_name,
+            "action": action,
+            "remediation": "Open the admin Settings and connect the integration.",
+            "remediation_url": "/google/oauth/start" if "google" in lower else None,
+        }
+    if "rate" in lower and "limit" in lower:
+        return {
+            "kind": "rate_limited",
+            "detail": message,
+            "app": app_name,
+            "action": action,
+            "remediation": "Wait a minute and try again.",
+        }
+    if "permission" in lower or "denied" in lower or "host bridge" in lower:
+        return {
+            "kind": "permission_denied",
+            "detail": message,
+            "app": app_name,
+            "action": action,
+            "remediation": "Check macOS Automation permissions for The Brain.",
+        }
+    return {
+        "kind": "execution_failed",
+        "detail": message,
+        "app": app_name,
+        "action": action,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -820,38 +876,78 @@ async def telephony_stream(websocket: WebSocket) -> None:
             pass
 
 
+def _voice_user_id() -> str:
+    """Stable Zep user_id derived from the operator profile name.
+
+    Single-tenant app: there's one operator. We slug their name so memory
+    accumulates under a stable id ("matt") even if they edit their profile.
+    Falls back to "operator" if the name isn't set.
+    """
+    try:
+        name = (user_profile_service.get().get("name") or "").strip()
+    except Exception:
+        name = ""
+    slug = "".join(c.lower() if c.isalnum() else "_" for c in name).strip("_")
+    return slug or "operator"
+
+
+def _voice_thread_id() -> str:
+    """Single rolling thread per operator. All voice convos accumulate here so
+    Zep can summarize and surface the long-running context."""
+    return f"voice:{_voice_user_id()}"
+
+
 @router.post("/realtime/session")
 async def create_realtime_session() -> dict:
     """Mint a short-lived OpenAI Realtime session the browser can use to open a WebRTC connection.
 
-    The browser never sees the long-lived API key. The ephemeral ``client_secret``
-    returned here is valid for about a minute and is scoped to a single session.
+    The browser never sees the long-lived API key. The ephemeral token returned
+    here is valid for about a minute and is scoped to a single session.
+
+    GA migration (May 2026): switched from POST /v1/realtime/sessions (deprecated
+    May 18, 2026 alongside the gpt-4o-realtime-preview model and the
+    ``OpenAI-Beta: realtime=v1`` header) to POST /v1/realtime/client_secrets with
+    the nested-session body shape. Response is flattened here so the frontend
+    contract stays stable — it still reads ``client_secret.value`` and ``model``
+    at the top level.
     """
     if not settings.openai_api_key:
         raise HTTPException(status_code=503, detail="OpenAI not configured")
 
     import httpx  # Local import — httpx is already in the backend dep set.
-    from app.services.user_profile_service import user_profile_service
 
-    model = "gpt-4o-realtime-preview"
-    # "ash" is the warmer, more conversational OpenAI Realtime voice — less flat
-    # than alloy, still unmistakably human, lands well for a "chief of staff"
-    # persona. Swap via OPENAI_REALTIME_VOICE if you want to try others (sage,
-    # coral, ballad, verse).
-    voice = (getattr(settings, "openai_realtime_voice", "") or "ash").strip() or "ash"
+    model = "gpt-realtime"
+    voice = (getattr(settings, "openai_realtime_voice", "") or "coral").strip() or "coral"
 
     try:
         operator_profile = user_profile_service.render_context()
     except Exception:
         operator_profile = ""
 
+    memory_context = ""
+    try:
+        if memory_service.enabled:
+            memory_context = await memory_service.get_thread_context(_voice_thread_id())
+    except Exception:
+        memory_context = ""
+
+    inbox_brief = ""
+    try:
+        from app.services.task_inbox_service import task_inbox_service
+
+        inbox_brief = task_inbox_service.render_pending_brief()
+    except Exception:
+        inbox_brief = ""
+
     payload = build_realtime_session_payload(
         model=model,
         voice=voice,
         operator_profile=operator_profile,
+        memory_context=memory_context,
+        inbox_brief=inbox_brief,
     )
 
-    url = f"{settings.openai_base_url.rstrip('/')}/realtime/sessions"
+    url = f"{settings.openai_base_url.rstrip('/')}/realtime/client_secrets"
     try:
         async with httpx.AsyncClient(timeout=20) as client:
             res = await client.post(
@@ -859,8 +955,6 @@ async def create_realtime_session() -> dict:
                 headers={
                     "Authorization": f"Bearer {settings.openai_api_key}",
                     "Content-Type": "application/json",
-                    # Realtime sessions endpoint needs the beta opt-in header.
-                    "OpenAI-Beta": "realtime=v1",
                 },
                 json=payload,
             )
@@ -870,11 +964,340 @@ async def create_realtime_session() -> dict:
     if res.status_code >= 400:
         raise HTTPException(status_code=res.status_code, detail=f"OpenAI realtime: {res.text[:400]}")
 
-    data = res.json()
-    # Echo back the agent map so the frontend can label specialists without
-    # re-hardcoding it. Small, stable, and convenient.
+    raw = res.json()
+    # The new endpoint returns {value, expires_at, session: {...}} where the
+    # old one returned {..., client_secret: {value, expires_at}}. We flatten
+    # back into the legacy shape so the frontend's RealtimeSession type +
+    # WebRTC SDP exchange code keeps working without churn — and also
+    # surface the inner session fields at the top level for the same reason.
+    inner_session = raw.get("session") or {}
+    data: dict = {
+        **inner_session,
+        "client_secret": {
+            "value": raw.get("value"),
+            "expires_at": raw.get("expires_at"),
+        },
+        "model": inner_session.get("model") or model,
+    }
     data["agents"] = SPECIALIST_ROUTES
     return data
+
+
+@router.get("/realtime/session/instructions")
+async def get_fresh_realtime_instructions() -> dict:
+    """Return a freshly composed instructions string for the coordinator
+    session, including the current operator profile + Zep memory + inbox
+    brief. The frontend uses this for mid-call hot-reload via
+    `session.update` — when the operator updates their profile while a
+    session is active, we push fresh instructions instead of waiting for
+    the next session start.
+
+    Cheap to compute (one Zep + one inbox read), safe to call any time."""
+    try:
+        operator_profile = user_profile_service.render_context()
+    except Exception:
+        operator_profile = ""
+
+    memory_context = ""
+    try:
+        if memory_service.enabled:
+            memory_context = await memory_service.get_thread_context(_voice_thread_id())
+    except Exception:
+        memory_context = ""
+
+    inbox_brief = ""
+    try:
+        from app.services.task_inbox_service import task_inbox_service
+
+        inbox_brief = task_inbox_service.render_pending_brief()
+    except Exception:
+        inbox_brief = ""
+
+    payload = build_realtime_session_payload(
+        model="gpt-4o-realtime-preview",  # not used here, but the helper requires it
+        voice="coral",
+        operator_profile=operator_profile,
+        memory_context=memory_context,
+        inbox_brief=inbox_brief,
+    )
+    return {
+        "ok": True,
+        "instructions": payload.get("instructions", ""),
+    }
+
+
+@router.post("/voice/conversation/persist")
+async def persist_voice_conversation(payload: dict) -> dict:
+    """Flush the realtime transcript into the operator's rolling voice thread.
+
+    Called by the frontend when the operator ends a call. We append each
+    message to Zep so future sessions can pull "what we talked about
+    yesterday" via thread context. Best-effort — if Zep is offline we
+    return ok with persisted=0 rather than blocking the End-call UX.
+
+    Also marks any pending task-inbox entries as delivered, since Brain
+    presumably surfaced them during the call (they were injected into the
+    session prompt).
+    """
+    raw_messages = payload.get("messages") if isinstance(payload, dict) else None
+    if not isinstance(raw_messages, list):
+        raise HTTPException(status_code=400, detail="messages array required")
+
+    user_id = _voice_user_id()
+    thread_id = _voice_thread_id()
+    persisted = 0
+
+    if memory_service.enabled:
+        for msg in raw_messages:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "").strip().lower()
+            content = str(msg.get("content") or "").strip()
+            if not content:
+                continue
+            # Map our internal roles ("you" / "delegator" / "agent") onto
+            # Zep's expected ("user" / "assistant"). We treat any non-"you"
+            # role as assistant so specialist replies persist too.
+            zep_role = "user" if role == "you" else "assistant"
+            try:
+                await memory_service.add_message(
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    role=zep_role,
+                    content=content,
+                    metadata={"source": "voice_realtime"},
+                )
+                persisted += 1
+            except Exception:
+                # Swallow per-message failures so a single bad message doesn't
+                # lose the rest of the conversation.
+                continue
+
+    # Mark any pending task-inbox items as delivered. The session prompt
+    # surfaced them; if the operator ended the call they were either heard or
+    # explicitly skipped — either way we don't re-announce them next time.
+    delivered_count = 0
+    try:
+        from app.services.task_inbox_service import task_inbox_service
+
+        delivered_count = task_inbox_service.mark_all_pending_delivered()
+    except Exception:
+        delivered_count = 0
+
+    return {
+        "ok": True,
+        "persisted": persisted,
+        "thread_id": thread_id,
+        "user_id": user_id,
+        "tasks_delivered": delivered_count,
+        "memory_enabled": memory_service.enabled,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Voice telemetry — minimal observability for sessions + tool calls.
+# Appends one JSON object per event to ~/Library/Application Support/Brain/
+# data/voice_telemetry.jsonl. No analytics service, no log shipping — just
+# a local audit trail you can grep when something feels off.
+# ---------------------------------------------------------------------------
+
+
+def _voice_telemetry_path() -> Path:
+    base = os.environ.get("BRAIN_DATA_DIR", "").strip()
+    if base:
+        return Path(base) / "data" / "voice_telemetry.jsonl"
+    return Path("data/voice_telemetry.jsonl")
+
+
+@router.post("/telemetry/voice-session")
+async def record_voice_telemetry(payload: dict) -> dict:
+    """Append a session-summary or tool-call event to the local telemetry
+    log. Frontend posts here after End-call (session summary) and on each
+    tool dispatch (latency + status).
+
+    Best-effort: any IO failure returns ok=true with a hint so the
+    frontend never blocks End-call on a logging hiccup.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    record = {
+        "ts": datetime.now(tz=timezone.utc).isoformat(),
+        **{k: v for k, v in payload.items() if k != "ts"},
+    }
+    try:
+        path = _voice_telemetry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return {"ok": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Direct specialist voice (browser ↔ ElevenLabs Conv AI)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/elevenlabs/web-session/{specialist_id}")
+async def create_specialist_web_session(specialist_id: str) -> dict:
+    """Provision (or reuse) a Conv AI agent for the requested specialist
+    and return a short-lived signed WebSocket URL the browser opens
+    directly. Audio runs browser ↔ ElevenLabs without going through us.
+
+    The specialist's voice + persona come from agent_profile_service. The
+    client connects to the returned `signed_url`, sends 16 kHz PCM mic
+    audio, and plays back 16 kHz PCM agent audio.
+    """
+    sid = (specialist_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="specialist_id required")
+
+    try:
+        from app.services.elevenlabs_specialist_service import (
+            ElevenLabsSpecialistError,
+            build_session_prompt,
+            ensure_specialist_agent,
+            get_signed_url,
+        )
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail=f"specialist module load: {exc}") from exc
+
+    try:
+        meta = await ensure_specialist_agent(sid)
+        signed_url = await get_signed_url(meta["agent_id"])
+        # Compose the per-session prompt — bakes operator profile, Zep memory,
+        # and inbox brief into the prompt so the specialist knows who the
+        # operator is and what's been going on. This refreshes per session
+        # so updates don't require re-provisioning the agent.
+        session_prompt = await build_session_prompt(sid)
+    except ElevenLabsSpecialistError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "specialist_id": sid,
+        "agent_id": meta["agent_id"],
+        "voice_id": meta["voice_id"],
+        "name": meta["name"],
+        "signed_url": signed_url,
+        # Browser-side audio constants. Echoed here so the client doesn't
+        # have to know them out-of-band.
+        "audio": {
+            "input_sample_rate": 16000,
+            "output_sample_rate": 16000,
+            "input_format": "pcm_16000",
+            "output_format": "pcm_16000",
+        },
+        # The browser sends this as `conversation_config_override` in the
+        # WebSocket initiation. ElevenLabs replaces the agent's prompt for
+        # this session — giving us fresh per-call operator context without
+        # re-provisioning the agent every time.
+        "conversation_overrides": {
+            "agent": {
+                "prompt": {"prompt": session_prompt},
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Background task inbox — "ask now, deliver later"
+# ---------------------------------------------------------------------------
+
+
+@router.post("/tasks/background")
+async def create_background_task(payload: dict) -> dict:
+    """Kick off a one-shot background task.
+
+    Brain calls this via the `schedule_task` realtime tool when the operator
+    says "Brain, research X and have it ready in the morning". The run fires
+    immediately on a daemon thread; the operator gets the answer surfaced at
+    the start of the next voice session via /realtime/session's prompt
+    injection.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    name = str(payload.get("name") or "").strip()
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+
+    from app.services.task_inbox_service import dispatch_background_task
+
+    user_id = _voice_user_id()
+    entry = await dispatch_background_task(
+        name=name or "Background task", prompt=prompt, user_id=user_id
+    )
+    return {"ok": True, "task": entry}
+
+
+@router.get("/tasks/inbox")
+async def list_task_inbox(include: str = "pending") -> dict:
+    """List background-task entries.
+
+    `include=pending` (default) → completed but not delivered. Used by the
+    voice session prompt builder.
+    `include=all` → everything, most-recent first. Used by an admin panel.
+    """
+    from app.services.task_inbox_service import task_inbox_service
+
+    if include == "all":
+        return {"tasks": task_inbox_service.list_all()}
+    return {"tasks": task_inbox_service.list_pending()}
+
+
+@router.post("/tasks/inbox/{task_id}/acknowledge")
+async def acknowledge_task(task_id: str) -> dict:
+    """Mark a single inbox entry as delivered.
+
+    Currently unused — /voice/conversation/persist marks all-pending as
+    delivered, which is sufficient for the "Brain announces at session
+    start" UX. Exposed for future targeted dismiss.
+    """
+    from app.services.task_inbox_service import task_inbox_service
+
+    task = task_inbox_service.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.get("status") not in {"completed", "failed"}:
+        raise HTTPException(status_code=409, detail="task not in a terminal state")
+    if task.get("delivered_at"):
+        return {"ok": True, "already_delivered": True, "task": task}
+    # Reuse the bulk method but expect to deliver exactly one.
+    delivered = task_inbox_service.mark_all_pending_delivered()
+    return {"ok": True, "delivered_count": delivered}
+
+
+# ---------------------------------------------------------------------------
+# Document creation — Markdown → HTML, opened in default browser
+# ---------------------------------------------------------------------------
+
+
+@router.post("/documents/create")
+async def create_document(payload: dict) -> dict:
+    """Render a Markdown document to standalone HTML and persist it under
+    BRAIN_DATA_DIR/documents/. The frontend opens the resulting file:// URL
+    in the system browser; user can Cmd+P → Save as PDF for an actual PDF.
+
+    Brain calls this via the `create_document` realtime tool whenever the
+    operator says things like "make me a one-pager on X" or "write up that
+    plan as a doc."
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+    title = str(payload.get("title") or "").strip()
+    content_md = str(payload.get("content_md") or payload.get("content") or "")
+    if not content_md.strip():
+        raise HTTPException(status_code=400, detail="content_md is required")
+
+    from app.services.document_render_service import document_render_service
+
+    try:
+        result = document_render_service.render(title=title, content_md=content_md)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"render failed: {exc}") from exc
+    return {"ok": True, "document": result}
 
 
 @router.get("/runs/{run_id}/memory", response_model=RunMemoryResponse)
@@ -1747,6 +2170,57 @@ async def open_desktop_action(action_id: str):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "path": output_path}
+
+
+@router.get("/system/capabilities")
+async def system_capabilities():
+    """Coarse per-capability availability map for the frontend.
+
+    Returns ``{capability_name: {available: bool, reason?: str}}``.
+
+    The frontend uses this to hide / dim features that the operator
+    hasn't configured yet, instead of showing a button that errors when
+    clicked. Aligns with the wizard's capability disclosure so what they
+    saw at setup matches what they see at runtime.
+
+    No PII or secrets — just bools + the env-var hint that would unlock
+    each feature."""
+    secretary_status = secretary_service.status()
+    channel = secretary_status.get("channel_status", {}) or {}
+
+    def cap(available: bool, reason: str | None = None, requires: str | None = None) -> dict:
+        out = {"available": bool(available)}
+        if not available and reason:
+            out["reason"] = reason
+        if requires:
+            out["requires"] = requires
+        return out
+
+    return {
+        "voice_primary": cap(
+            bool(getattr(settings, "openai_api_key", "")),
+            reason="OPENAI_API_KEY not set" if not getattr(settings, "openai_api_key", "") else None,
+            requires="OPENAI_API_KEY",
+        ),
+        "voice_specialists": cap(
+            bool(settings.elevenlabs_api_key),
+            reason="ELEVENLABS_API_KEY not set" if not settings.elevenlabs_api_key else None,
+            requires="ELEVENLABS_API_KEY",
+        ),
+        "memory_long_term": cap(
+            bool(settings.zep_api_key),
+            reason="ZEP_API_KEY not set" if not settings.zep_api_key else None,
+            requires="ZEP_API_KEY",
+        ),
+        "calendar": cap(
+            bool(getattr(settings, "google_workspace_token_store_path", None)),
+            reason="Google Workspace not connected — visit /google/oauth/start",
+            requires="OAuth",
+        ),
+        "secretary_email": cap(bool(channel.get("email")), requires="email channel config"),
+        "secretary_call": cap(bool(channel.get("call")), requires="telephony provider config"),
+        "secretary_sms": cap(bool(channel.get("sms")), requires="SMS provider config"),
+    }
 
 
 @router.get("/health")

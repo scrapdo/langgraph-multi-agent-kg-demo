@@ -41,6 +41,14 @@ export interface UseRealtimeAgentResult {
   inputLevel: number;
   error: string | null;
   session: RealtimeSession | null;
+  /** Current reconnect attempt number (1..5). 0 means we're either
+   *  connected normally or fully idle. The shell uses this to render
+   *  "reconnecting (2/5)…" instead of just "connecting…" so the user
+   *  knows the agent is recovering, not starting fresh. */
+  reconnectAttempt: number;
+  /** The cap we'll stop trying at. Pinned to 5 today; surfaced so the
+   *  UI can render "(N/5)" without hard-coding the cap on its end. */
+  maxReconnectAttempts: number;
   /** True when the outbound mic track is disabled (AI can't hear you). */
   muted: boolean;
   start: () => Promise<void>;
@@ -56,6 +64,13 @@ export interface UseRealtimeAgentResult {
   requestResponse: () => void;
   /** Temporarily silence the assistant's current turn (cancel response). */
   interrupt: () => void;
+  /** Hot-reload the agent's instructions mid-call. Fetches fresh
+   *  operator-context + Zep memory + inbox from the backend and pushes
+   *  it via OpenAI Realtime's `session.update` event so the model
+   *  starts using the new context on its next turn. No reconnect needed.
+   *  Best-effort: silently no-ops if the data channel isn't open or the
+   *  backend fetch fails. */
+  refreshInstructions: () => Promise<void>;
 }
 
 const REALTIME_BASE = 'https://api.openai.com/v1/realtime';
@@ -86,6 +101,11 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
   const [outputLevel, setOutputLevel] = useState(0);
   const [inputLevel, setInputLevel] = useState(0);
   const [muted, setMutedState] = useState(false);
+  // Reconnect counter mirrored as React state so the UI re-renders when it
+  // changes. The ref (below) is what the connection-state handler mutates
+  // synchronously; this state lags by one tick which is fine for display.
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const MAX_RECONNECT_ATTEMPTS = 5;
 
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
@@ -99,6 +119,14 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
   const partialAssistantRef = useRef<string>('');
   /** Guards start() against React StrictMode dev double-invocation. */
   const connectingRef = useRef<boolean>(false);
+  // Reconnect bookkeeping — mirror of the ElevenLabs hook's pattern. WebRTC
+  // doesn't expose a "close" callback the way WebSocket does; we hook
+  // pc.connectionState transitions instead. When the state goes to
+  // 'failed' or 'disconnected' AND it wasn't user-initiated (intentional
+  // close via stop/endCall), schedule a reconnect with exponential backoff.
+  const intentionalCloseRef = useRef<boolean>(false);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   const handlersRef = useRef<HookOptions>(options);
   useEffect(() => {
@@ -176,7 +204,12 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
           if (delta) partialAssistantRef.current += delta;
           break;
         }
-        case 'response.audio_transcript.done': {
+        case 'response.audio_transcript.done':
+        case 'response.output_audio_transcript.done': {
+          // GA Realtime (May 2026) renamed the event to
+          // response.output_audio_transcript.done; we accept both so the
+          // hook works against the GA model AND any legacy session that
+          // still sends the old name during the rollout window.
           const text = partialAssistantRef.current.trim();
           partialAssistantRef.current = '';
           if (text && handlersRef.current.onAssistantText) handlersRef.current.onAssistantText(text);
@@ -222,7 +255,13 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
   );
 
   // ---- lifecycle --------------------------------------------------------
-  const stop = useCallback(() => {
+  /** Tear down audio + WebRTC resources. Used by stop (operator-initiated)
+   *  and by the reconnect path (transient drop). The `keepIntentionalFlag`
+   *  argument is what distinguishes them: stop() flips intentionalCloseRef
+   *  to true so the connectionState handler doesn't auto-reconnect; the
+   *  reconnect path passes false so the next failure can still trigger
+   *  another reconnect attempt. */
+  const teardownConnection = useCallback(() => {
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -239,13 +278,26 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
       /* ignore */
     }
     pcRef.current = null;
-    micStreamRef.current?.getTracks().forEach((t) => t.stop());
-    micStreamRef.current = null;
     if (audioElRef.current) {
       audioElRef.current.srcObject = null;
       audioElRef.current.remove();
       audioElRef.current = null;
     }
+    // Mic stream + audio context survive across reconnects to avoid
+    // re-prompting permission. They get fully cleaned up by stop().
+  }, []);
+
+  const stop = useCallback(() => {
+    intentionalCloseRef.current = true;
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttemptsRef.current = 0;
+    setReconnectAttempt(0);
+    teardownConnection();
+    micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    micStreamRef.current = null;
     try {
       audioCtxRef.current?.close();
     } catch {
@@ -258,11 +310,18 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
     setInputLevel(0);
     setMutedState(false);
     updateState('idle');
-  }, [updateState]);
+  }, [teardownConnection, updateState]);
 
   const start = useCallback(async () => {
     if (pcRef.current || connectingRef.current) return;
+    // Cancel any pending reconnect — explicit start() means the operator
+    // wants to drive the lifecycle.
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     connectingRef.current = true;
+    intentionalCloseRef.current = false;
     setError(null);
     updateState('connecting');
     try {
@@ -273,6 +332,49 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
 
       const pc = new RTCPeerConnection();
       pcRef.current = pc;
+
+      // Lifecycle hook: WebRTC's connectionState rolls up the underlying
+      // ICE / DTLS state. 'failed' is fatal at the network layer (NATs,
+      // server crash, etc); 'disconnected' is recoverable (transient
+      // packet loss, brief network change). Both should trigger reconnect
+      // when the close wasn't operator-initiated.
+      pc.onconnectionstatechange = () => {
+        const cs = pc.connectionState;
+        if (cs === 'connected') {
+          // Successful (re)connect — clear backoff counter (ref + UI mirror).
+          reconnectAttemptsRef.current = 0;
+          setReconnectAttempt(0);
+          return;
+        }
+        if (cs !== 'failed' && cs !== 'disconnected' && cs !== 'closed') return;
+        if (intentionalCloseRef.current) return;
+        // Already scheduled? Don't double-book.
+        if (reconnectTimerRef.current !== null) return;
+
+        const attempt = reconnectAttemptsRef.current + 1;
+        reconnectAttemptsRef.current = attempt;
+        setReconnectAttempt(attempt);
+        if (attempt > MAX_RECONNECT_ATTEMPTS) {
+          setError('connection lost — click Connect to retry');
+          updateState('error');
+          setReconnectAttempt(0);
+          return;
+        }
+        const delay = Math.min(8000, 250 * 2 ** (attempt - 1));
+        updateState('connecting');
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnectTimerRef.current = null;
+          // Tear down the dead pc; keep mic alive to avoid re-prompting.
+          teardownConnection();
+          // start() bails when pcRef is set, so we cleared it via teardown.
+          // Use a stable self-reference via `void start()`; the captured
+          // start is the same useCallback (stable across renders).
+          void start().catch((err) => {
+            setError(err instanceof Error ? err.message : String(err));
+            updateState('error');
+          });
+        }, delay);
+      };
 
       // Remote audio element for playback.
       const audioEl = document.createElement('audio');
@@ -323,8 +425,28 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
       };
       dc.onerror = () => setError('Realtime data channel error');
 
-      // Mic.
-      const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Mic. We separate the getUserMedia error path so the UI can offer
+      // platform-specific guidance ("System Settings → Privacy → Microphone")
+      // instead of the generic "session failed" message that wraps the rest
+      // of the start() failure modes. NotAllowedError fires when the user
+      // declined the prompt; NotFoundError fires when there's no input
+      // device at all (rare on laptops, more common on desktops with no
+      // mic plugged in).
+      let micStream: MediaStream;
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (micErr) {
+        const name = (micErr as { name?: string } | null)?.name ?? '';
+        const tag =
+          name === 'NotAllowedError' || name === 'PermissionDeniedError'
+            ? 'mic_denied'
+            : name === 'NotFoundError' || name === 'DevicesNotFoundError'
+              ? 'mic_missing'
+              : 'mic_unavailable';
+        throw new Error(
+          `${tag}: ${micErr instanceof Error ? micErr.message : String(micErr)}`,
+        );
+      }
       micStreamRef.current = micStream;
       micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
 
@@ -367,13 +489,26 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
       const answer = { type: 'answer' as RTCSdpType, sdp: await sdpResponse.text() };
       await pc.setRemoteDescription(answer);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Tag the error so consumers can offer the right recovery path:
+      //   - mic_denied / mic_missing / mic_unavailable → operator action
+      //     needed (system settings, plug in a mic). Failover won't help
+      //     because every voice provider needs a mic.
+      //   - realtime_unavailable → upstream issue (OpenAI down, key
+      //     missing, WebRTC SDP exchange failed). Surface a "use backup
+      //     voice" CTA which routes around the Realtime API entirely.
+      const message = err instanceof Error ? err.message : String(err);
+      const isMicError = /^mic_(denied|missing|unavailable):/.test(message);
+      setError(isMicError ? message : `realtime_unavailable: ${message}`);
       updateState('error');
       stop();
     } finally {
       connectingRef.current = false;
     }
-  }, [handleRealtimeEvent, startAnalyserLoop, stop, updateState]);
+    // teardownConnection is referenced by the onconnectionstatechange
+    // reconnect path. eslint-disable for the recursive `start` call inside
+    // setTimeout — it's a stable useCallback reference.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handleRealtimeEvent, startAnalyserLoop, stop, teardownConnection, updateState]);
 
   const sendText = useCallback(
     (text: string) => {
@@ -434,6 +569,34 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
     setMuted(!muted);
   }, [muted, setMuted]);
 
+  /** Hot-reload session instructions mid-call. Useful when the operator
+   *  updates their profile, completes a background task, or otherwise
+   *  changes context that should land in the agent's prompt. We fetch
+   *  fresh instructions from the backend (which composes operator
+   *  profile + Zep memory + inbox brief) then push via session.update.
+   *  OpenAI applies the change to the agent's NEXT turn — no reconnect. */
+  const refreshInstructions = useCallback(async () => {
+    if (dcRef.current?.readyState !== 'open') return;
+    const apiBase =
+      (typeof window !== 'undefined' &&
+        (window as { __BRAIN_API_BASE__?: string }).__BRAIN_API_BASE__) ||
+      (import.meta.env.VITE_API_BASE as string | undefined) ||
+      'http://localhost:8000';
+    try {
+      const res = await fetch(`${apiBase}/realtime/session/instructions`);
+      if (!res.ok) return;
+      const body = (await res.json()) as { instructions?: string };
+      const instructions = (body.instructions || '').trim();
+      if (!instructions) return;
+      sendEvent({
+        type: 'session.update',
+        session: { instructions },
+      });
+    } catch {
+      /* best-effort — silently no-op on network/parse errors */
+    }
+  }, [sendEvent]);
+
   useEffect(() => {
     return () => {
       stop();
@@ -447,6 +610,8 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
     error,
     session,
     muted,
+    reconnectAttempt,
+    maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
     start,
     stop,
     setMuted,
@@ -455,5 +620,6 @@ export function useRealtimeAgent(options: HookOptions = {}): UseRealtimeAgentRes
     sendToolResult,
     requestResponse,
     interrupt,
+    refreshInstructions,
   };
 }
